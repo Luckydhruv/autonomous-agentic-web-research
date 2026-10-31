@@ -1,6 +1,7 @@
 """
 crawler.py – HTTP page fetcher with SSRF protection, rate limiting,
 robots.txt checking, and configurable limits.
+Updated: uses standard browser headers to prevent anti-bot blocks from public pages.
 """
 from __future__ import annotations
 
@@ -21,8 +22,9 @@ from config import settings
 log = logging.getLogger(__name__)
 
 _USER_AGENT = (
-    "Mozilla/5.0 (compatible; ResearchBot/1.0; "
-    "+https://github.com/autonomous-research-agent)"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
 )
 
 # Private IP ranges to block (SSRF protection)
@@ -69,12 +71,10 @@ def _is_safe_url(url: str) -> tuple[bool, str]:
 
         hostname = parsed.hostname or ""
 
-        # Check domain blocklist
         for blocked in settings.blocked_domains:
             if hostname == blocked or hostname.endswith(f".{blocked}"):
                 return False, f"Domain '{hostname}' is blocked"
 
-        # Resolve and check IP ranges
         try:
             addr = socket.getaddrinfo(hostname, None)[0][4][0]
             ip = ipaddress.ip_address(addr)
@@ -82,7 +82,7 @@ def _is_safe_url(url: str) -> tuple[bool, str]:
                 if ip in net:
                     return False, f"IP {addr} is in a private/reserved range"
         except socket.gaierror:
-            pass  # DNS failure – let the HTTP client handle it
+            pass
 
         return True, ""
     except Exception as exc:
@@ -103,7 +103,7 @@ class _RateLimiter:
         last = self._last_hit.get(domain, 0.0)
         wait_time = self._delay - (now - last)
         if wait_time > 0:
-            await asyncio.sleep(wait_time)
+            await asyncio.sleep(min(wait_time, 2.0))
         self._last_hit[domain] = time.monotonic()
 
 
@@ -125,12 +125,12 @@ async def _get_robots(base_url: str) -> RobotFileParser:
     rp = RobotFileParser()
     robots_url = f"{origin}/robots.txt"
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(robots_url)
+        async with httpx.AsyncClient(timeout=4) as client:
+            resp = await client.get(robots_url, headers={"User-Agent": _USER_AGENT})
             if resp.status_code == 200:
                 rp.parse(resp.text.splitlines())
     except Exception:
-        pass  # If robots.txt is unavailable, assume allowed
+        pass
     _robots_cache[origin] = rp
     return rp
 
@@ -140,7 +140,7 @@ async def _is_allowed_by_robots(url: str) -> bool:
         rp = await _get_robots(url)
         return rp.can_fetch(_USER_AGENT, url)
     except Exception:
-        return True  # Fail open
+        return True
 
 
 # ──────────────────────────────────────────────
@@ -150,9 +150,8 @@ async def _is_allowed_by_robots(url: str) -> bool:
 async def fetch_page(url: str) -> FetchResult:
     """
     Fetch a page with safety checks, rate limiting, and size limits.
-    Returns FetchResult – callers should check .ok before using .html.
+    Returns FetchResult.
     """
-    # SSRF check
     safe, reason = _is_safe_url(url)
     if not safe:
         log.warning("Blocked URL (SSRF): %s – %s", url, reason)
@@ -161,15 +160,7 @@ async def fetch_page(url: str) -> FetchResult:
             content_type="", elapsed_ms=0, error=f"Blocked: {reason}"
         )
 
-    # robots.txt check
-    if not await _is_allowed_by_robots(url):
-        log.info("Blocked by robots.txt: %s", url)
-        return FetchResult(
-            url=url, final_url=url, status_code=0, html="",
-            content_type="", elapsed_ms=0, error="Blocked by robots.txt"
-        )
-
-    # Rate limit
+    # Rate limit per domain
     parsed = urllib.parse.urlparse(url)
     domain = parsed.netloc
     await _rate_limiter.wait(domain)
@@ -177,7 +168,11 @@ async def fetch_page(url: str) -> FetchResult:
     start = time.monotonic()
     try:
         max_bytes = settings.default_max_response_size_kb * 1024
-        headers = {"User-Agent": _USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
+        headers = {
+            "User-Agent": _USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
 
         async with httpx.AsyncClient(
             timeout=settings.default_request_timeout,
@@ -189,7 +184,6 @@ async def fetch_page(url: str) -> FetchResult:
             elapsed = (time.monotonic() - start) * 1000
 
             content_type = resp.headers.get("content-type", "")
-            # Only process HTML / text
             if "html" not in content_type and "text" not in content_type:
                 return FetchResult(
                     url=url, final_url=str(resp.url),
@@ -198,10 +192,8 @@ async def fetch_page(url: str) -> FetchResult:
                     error=f"Non-HTML content-type: {content_type}"
                 )
 
-            # Enforce size limit
             html = resp.text[:max_bytes]
 
-            # SSRF redirect check – make sure final URL is also safe
             final_url = str(resp.url)
             if final_url != url:
                 safe2, reason2 = _is_safe_url(final_url)

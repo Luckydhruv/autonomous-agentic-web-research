@@ -15,10 +15,11 @@ export default function ResearchForm({ onCreated }) {
       setError('Please enter at least 10 characters.')
       return
     }
+    const pages = Math.max(10, Math.min(100, maxPages))
     setLoading(true)
     setError(null)
     try {
-      const task = await api.createTask(objective.trim(), maxPages, crawlDepth)
+      const task = await api.createTask(objective.trim(), pages, crawlDepth)
       onCreated(task)
       setObjective('')
     } catch (err) {
@@ -38,24 +39,25 @@ export default function ResearchForm({ onCreated }) {
           </label>
           <textarea
             className="input h-28 resize-none"
-            placeholder='e.g. "Find the top 10 gaming laptops under ₹80,000 in India, compare specs and recommend the best."'
+            placeholder='e.g. "Find the top 10 gaming laptops under ₹80,000 in India, compare specs and recommend the best." or "Latest AI news and developments in 2024"'
             value={objective}
             onChange={e => setObjective(e.target.value)}
             disabled={loading}
             required
           />
           <p className="text-xs text-slate-500 mt-1">
-            Describe your research goal in natural language. More detail = better results.
+            Describe your research goal in natural language. More detail = better, more relevant results.
           </p>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-slate-300 mb-1.5">
-              Max Pages <span className="text-slate-500 font-normal">(3–100)</span>
+              Max Pages <span className="text-slate-500 font-normal">(10–100)</span>
             </label>
-            <input type="number" className="input" min={3} max={100}
+            <input type="number" className="input" min={10} max={100}
               value={maxPages} onChange={e => setMaxPages(Number(e.target.value))} disabled={loading} />
+            <p className="text-xs text-slate-500 mt-1">Minimum 10 pages for meaningful results.</p>
           </div>
           <div>
             <label className="block text-sm font-medium text-slate-300 mb-1.5">
@@ -63,6 +65,7 @@ export default function ResearchForm({ onCreated }) {
             </label>
             <input type="number" className="input" min={1} max={5}
               value={crawlDepth} onChange={e => setCrawlDepth(Number(e.target.value))} disabled={loading} />
+            <p className="text-xs text-slate-500 mt-1">How deep to follow links from each page.</p>
           </div>
         </div>
 

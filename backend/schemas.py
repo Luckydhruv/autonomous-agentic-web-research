@@ -72,7 +72,7 @@ class CandidateURL(BaseModel):
     url: str
     priority: float = Field(default=0.5, ge=0.0, le=1.0)
     depth: int = 0
-    source: str = "discovery"   # discovery | link | seed
+    source: str = "discovery"   # discovery | link | seed | fallback_search
     reason: str = ""
 
 
@@ -135,7 +135,7 @@ class ResearchReport(BaseModel):
 
 class CreateTaskRequest(BaseModel):
     objective: str = Field(..., min_length=10, max_length=2000)
-    max_pages: int = Field(default=20, ge=3, le=100)
+    max_pages: int = Field(default=20, ge=10, le=100)  # minimum 10 pages enforced
     crawl_depth: int = Field(default=2, ge=1, le=5)
 
 

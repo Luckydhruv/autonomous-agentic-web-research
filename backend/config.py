@@ -40,12 +40,12 @@ class Settings(BaseSettings):
     search_provider: str = "duckduckgo_html"
     serper_api_key: str = ""
 
-    # Crawl defaults
+    # Crawl defaults — minimum 10 pages always enforced in planner/evaluator
     default_max_pages: int = 20
     default_crawl_depth: int = 2
-    default_request_timeout: int = 15
+    default_request_timeout: int = 20
     default_max_response_size_kb: int = 2048
-    default_rate_limit_delay: float = 1.5
+    default_rate_limit_delay: float = 1.0
 
     # Security
     extra_blocked_domains: str = ""

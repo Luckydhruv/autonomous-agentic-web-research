@@ -68,8 +68,22 @@ function PlanPanel({ plan }) {
         </div>
       </div>
       <div>
-        <p className="text-slate-400 mb-1">Search queries generated</p>
-        <ul className="space-y-0.5">{plan.search_queries?.map((q, i) => <li key={i} className="text-slate-200 font-mono text-xs">"{q}"</li>)}</ul>
+        <p className="text-slate-400 mb-1">Search queries generated ({plan.search_queries?.length})</p>
+        <ul className="space-y-1">
+          {plan.search_queries?.map((q, i) => (
+            <li key={i} className="text-slate-200 font-mono text-xs bg-slate-800/60 px-3 py-1 rounded">
+              {i + 1}. "{q}"
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div>
+        <p className="text-slate-400 mb-1">Source categories</p>
+        <div className="flex flex-wrap gap-1.5">
+          {plan.source_categories?.map((c, i) => (
+            <span key={i} className="badge bg-slate-700 text-slate-300 text-xs">{c}</span>
+          ))}
+        </div>
       </div>
       <div>
         <p className="text-slate-400 mb-1">Stopping criteria</p>
@@ -132,9 +146,9 @@ function SourcesPanel({ sources }) {
       {sources.records?.length > 0 && (
         <div>
           <p className="text-slate-400 mb-2">Extracted records ({sources.records.length})</p>
-          <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+          <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
             {sources.records.map((rec, i) => (
-              <div key={i} className="bg-slate-800/50 rounded-lg p-3 space-y-1">
+              <div key={i} className="bg-slate-800/50 rounded-lg p-3 space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-white text-sm font-medium line-clamp-1">{rec.title || 'Untitled'}</p>
                   <span className="badge bg-brand-900/60 text-brand-300 shrink-0">
@@ -142,6 +156,11 @@ function SourcesPanel({ sources }) {
                   </span>
                 </div>
                 <SourceLink url={rec.url} />
+                {rec.evidence_snippets?.length > 0 && (
+                  <p className="text-slate-400 text-xs italic line-clamp-2">
+                    "{rec.evidence_snippets[0].text}"
+                  </p>
+                )}
                 {Object.keys(rec.dynamic_fields ?? {}).length > 0 && (
                   <div className="flex flex-wrap gap-1.5 mt-1">
                     {Object.entries(rec.dynamic_fields).slice(0, 6).map(([k, v]) => (
@@ -177,7 +196,12 @@ function SourcesPanel({ sources }) {
 
 function ResultsPanel({ report }) {
   if (!report?.ranked_results?.length) {
-    return <p className="text-slate-500 text-sm">No ranked results yet.</p>
+    return (
+      <div className="text-center py-8 space-y-2">
+        <p className="text-slate-400 text-sm">No ranked results yet.</p>
+        <p className="text-slate-500 text-xs">Results appear after the research completes.</p>
+      </div>
+    )
   }
   const results = report.ranked_results
   return (
@@ -189,7 +213,7 @@ function ResultsPanel({ report }) {
               <span className="text-xs font-bold text-slate-500 bg-slate-800 rounded-full w-6 h-6 flex items-center justify-center shrink-0">
                 {r.rank}
               </span>
-              <p className="text-white text-sm font-medium line-clamp-1">{r.title}</p>
+              <p className="text-white text-sm font-medium line-clamp-2">{r.title}</p>
             </div>
             <span className="badge bg-brand-900/60 text-brand-300 shrink-0">
               {(r.final_score * 100).toFixed(0)}
@@ -198,11 +222,18 @@ function ResultsPanel({ report }) {
 
           <SourceLink url={r.url} />
 
+          {/* Evidence snippet */}
+          {r.evidence_snippets?.length > 0 && (
+            <p className="text-slate-400 text-xs italic bg-slate-900/40 px-3 py-2 rounded border-l-2 border-slate-700 line-clamp-3">
+              "{r.evidence_snippets[0].text}"
+            </p>
+          )}
+
           {Object.keys(r.dynamic_fields ?? {}).length > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {Object.entries(r.dynamic_fields).slice(0, 8).map(([k, v]) => (
                 <span key={k} className="badge bg-slate-700 text-slate-300 text-xs">
-                  {k}: {String(v).slice(0, 50)}
+                  {k}: {String(v).slice(0, 60)}
                 </span>
               ))}
             </div>
@@ -226,11 +257,19 @@ function ResultsPanel({ report }) {
 
 function ReportPanel({ report }) {
   if (!report?.report) {
-    return <p className="text-slate-500 text-sm">Report not yet generated.</p>
+    return (
+      <div className="text-center py-8 space-y-2">
+        <p className="text-slate-400 text-sm">Report not yet generated.</p>
+        <p className="text-slate-500 text-xs">The report is generated automatically when research completes.</p>
+      </div>
+    )
   }
   const r = report.report
+  const sourceDetails = r.crawl_stats?.source_details || []
+  const queriesUsed = r.crawl_stats?.search_queries_used || []
+
   return (
-    <div className="space-y-5 text-sm">
+    <div className="space-y-6 text-sm">
       {/* Executive summary */}
       <div>
         <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Executive Summary</h4>
@@ -241,14 +280,58 @@ function ReportPanel({ report }) {
       {r.key_findings?.length > 0 && (
         <div>
           <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Key Findings</h4>
-          <ul className="space-y-1">
+          <ul className="space-y-2">
             {r.key_findings.map((f, i) => (
               <li key={i} className="text-slate-200 flex gap-2">
-                <span className="text-brand-500 shrink-0">→</span>
+                <span className="text-brand-500 shrink-0 font-bold">{i + 1}.</span>
                 <span>{f}</span>
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* Source-by-source breakdown */}
+      {sourceDetails.length > 0 && (
+        <div>
+          <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">
+            Source Details ({sourceDetails.length} sources)
+          </h4>
+          <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
+            {sourceDetails.map((s, i) => (
+              <div key={i} className="bg-slate-800/50 rounded-lg p-3 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-white font-medium text-sm line-clamp-1">
+                      #{s.rank} {s.title}
+                    </p>
+                    <p className="text-slate-500 text-xs">{s.domain} · {s.date}</p>
+                  </div>
+                  <span className="badge bg-brand-900/40 text-brand-300 shrink-0 text-xs">
+                    score: {(s.score * 100).toFixed(0)}
+                  </span>
+                </div>
+                <a href={s.url} target="_blank" rel="noopener noreferrer"
+                  className="text-brand-400 hover:text-brand-300 text-xs truncate block">
+                  {s.url}
+                </a>
+                {s.key_info && (
+                  <p className="text-slate-400 text-xs italic border-l-2 border-slate-700 pl-2">
+                    "{s.key_info}"
+                  </p>
+                )}
+                {Object.keys(s.fields || {}).length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {Object.entries(s.fields).slice(0, 5).map(([k, v]) => (
+                      <span key={k} className="text-xs bg-slate-700/60 text-slate-300 px-2 py-0.5 rounded">
+                        {k}: {String(v).slice(0, 50)}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -273,7 +356,7 @@ function ReportPanel({ report }) {
                     {Object.entries(row).map(([k, v]) => (
                       <td key={k} className="px-3 py-2 text-slate-300 whitespace-nowrap max-w-[200px] truncate">
                         {k === 'url'
-                          ? <a href={String(v)} target="_blank" rel="noopener noreferrer" className="text-brand-400 hover:underline truncate block max-w-[160px]">link</a>
+                          ? <a href={String(v)} target="_blank" rel="noopener noreferrer" className="text-brand-400 hover:underline truncate block max-w-[160px]">link ↗</a>
                           : String(v ?? '—')
                         }
                       </td>
@@ -283,6 +366,20 @@ function ReportPanel({ report }) {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* Search queries used */}
+      {queriesUsed.length > 0 && (
+        <div>
+          <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Search Queries Used</h4>
+          <ul className="space-y-1">
+            {queriesUsed.map((q, i) => (
+              <li key={i} className="text-slate-400 font-mono text-xs bg-slate-800/40 px-3 py-1 rounded">
+                {i + 1}. "{q}"
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -322,7 +419,7 @@ function ReportPanel({ report }) {
           <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Crawl Statistics</h4>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             {Object.entries(r.crawl_stats)
-              .filter(([, v]) => typeof v !== 'object' || v === null)
+              .filter(([k, v]) => typeof v !== 'object' || v === null)
               .map(([k, v]) => (
                 <div key={k} className="bg-slate-800/60 rounded px-3 py-2">
                   <p className="text-slate-500 text-xs capitalize">{k.replace(/_/g, ' ')}</p>
@@ -342,6 +439,18 @@ function ReportPanel({ report }) {
         </div>
         <span className="text-white font-bold text-sm">{((r.confidence_score ?? 0) * 100).toFixed(0)}%</span>
       </div>
+
+      {/* Sources list */}
+      {r.sources?.length > 0 && (
+        <div>
+          <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">All Sources ({r.sources.length})</h4>
+          <div className="space-y-1 max-h-48 overflow-y-auto">
+            {r.sources.map((s, i) => (
+              <SourceLink key={i} url={s} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -369,7 +478,6 @@ export default function TaskDetail() {
       setProgress(progressData)
       setError(null)
 
-      // Fetch sources and report regardless of status
       const [srcData, rptData] = await Promise.all([
         api.getSources(taskId).catch(() => null),
         api.getReport(taskId).catch(() => null),

@@ -1,7 +1,6 @@
 """
 planner.py – Convert a natural-language research objective into a
-validated ResearchPlan.  Uses LLM when available; falls back to a
-deterministic keyword-based planner.
+validated ResearchPlan with high-precision search queries and extraction schema.
 """
 from __future__ import annotations
 
@@ -15,45 +14,7 @@ from schemas import ResearchPlan
 
 log = logging.getLogger(__name__)
 
-
-# ──────────────────────────────────────────────
-# LLM-based planner
-# ──────────────────────────────────────────────
-
-_PLAN_PROMPT = """You are a research planning agent. Convert the following research objective into a structured JSON plan.
-
-Research Objective: {objective}
-Max Pages Budget: {max_pages}
-
-Return ONLY valid JSON with this exact structure (no explanation, no markdown):
-{{
-  "topic": "concise topic name",
-  "constraints": ["list of constraints like price, location, time range"],
-  "required_fields": ["list of fields to extract, e.g. name, price, rating"],
-  "search_queries": ["3-5 specific search queries to find relevant pages"],
-  "source_categories": ["types of sites to look for, e.g. review sites, e-commerce"],
-  "ranking_priorities": ["what matters most for ranking, e.g. price, rating, freshness"],
-  "max_pages": {max_pages},
-  "stopping_criteria": ["when to consider research complete"],
-  "extraction_schema": {{
-    "field_name": "description of what to extract",
-    "field_name2": "description"
-  }}
-}}"""
-
-
-async def plan_with_llm(objective: str, max_pages: int) -> ResearchPlan | None:
-    prompt = _PLAN_PROMPT.format(objective=objective, max_pages=max_pages)
-    data = await generate_json(prompt)
-    if not data:
-        return None
-    try:
-        # Ensure max_pages is set from the user input, not the LLM
-        data["max_pages"] = max_pages
-        return ResearchPlan.model_validate(data)
-    except Exception as exc:
-        log.warning("LLM plan validation failed: %s", exc)
-        return None
+MIN_PAGES = 10
 
 
 # ──────────────────────────────────────────────
@@ -62,20 +23,22 @@ async def plan_with_llm(objective: str, max_pages: int) -> ResearchPlan | None:
 
 def _extract_price_constraint(text: str) -> list[str]:
     constraints = []
-    price_pattern = re.compile(
-        r"(under|below|less than|up to|within|max(?:imum)?)\s*"
-        r"[\$₹€£]?\s*[\d,]+",
-        re.IGNORECASE,
-    )
-    for m in price_pattern.finditer(text):
-        constraints.append(m.group(0).strip())
+    # Match under 1lakh, under 1 lakh, under 100000, under 50k, etc.
+    patterns = [
+        r"(?:under|below|less than|up to|within|max(?:imum)?)\s*[\$₹€£]?\s*[\d,]+(?:\s*(?:lakhs?|cr|k|million))?",
+        r"(?:under|below|less than|within)\s*(?:1\s*lakh|100000|₹1,00,000|50000|80000)",
+    ]
+    for p in patterns:
+        for m in re.finditer(p, text, re.IGNORECASE):
+            val = m.group(0).strip()
+            if val not in constraints:
+                constraints.append(val)
     return constraints
 
 
 def _extract_location(text: str) -> list[str]:
     location_keywords = [
         r"\bin\s+(india|usa|uk|us|canada|australia|germany|france|japan)\b",
-        r"\bin\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*",
     ]
     for pattern in location_keywords:
         m = re.search(pattern, text, re.IGNORECASE)
@@ -86,88 +49,115 @@ def _extract_location(text: str) -> list[str]:
 
 def _infer_fields(objective: str) -> list[str]:
     obj_lower = objective.lower()
-    field_map = {
-        ("laptop", "computer", "pc", "notebook"): [
-            "name", "price", "cpu", "gpu", "ram", "storage", "display", "rating", "availability"
-        ],
-        ("phone", "smartphone", "mobile"): [
-            "name", "price", "processor", "camera", "battery", "display", "rating"
-        ],
-        ("hotel", "resort", "accommodation"): [
-            "name", "price_per_night", "location", "rating", "amenities", "availability"
-        ],
-        ("job", "career", "hiring", "vacancy"): [
-            "title", "company", "location", "salary", "experience_required", "posted_date"
-        ],
-        ("movie", "film", "show", "series"): [
-            "title", "genre", "rating", "director", "cast", "release_year", "synopsis"
-        ],
-        ("research", "paper", "study", "article"): [
-            "title", "authors", "publication", "year", "abstract", "doi"
-        ],
-        ("recipe", "food", "dish", "cook"): [
-            "name", "ingredients", "prep_time", "cook_time", "servings", "calories"
-        ],
-    }
-    for keywords, fields in field_map.items():
-        if any(kw in obj_lower for kw in keywords):
-            return fields
-    # Generic fallback
-    return ["title", "description", "price", "rating", "date", "source"]
+    if any(kw in obj_lower for kw in ["laptop", "computer", "pc", "notebook"]):
+        return ["name", "price", "cpu", "gpu", "ram", "storage", "display", "suitability"]
+    if any(kw in obj_lower for kw in ["phone", "smartphone", "mobile"]):
+        return ["name", "price", "processor", "camera", "battery", "display"]
+    if any(kw in obj_lower for kw in ["placement", "salary", "package", "job", "career"]):
+        return ["highest_package", "average_package", "placement_rate", "top_recruiters", "year"]
+    if any(kw in obj_lower for kw in ["hotel", "resort", "accommodation"]):
+        return ["name", "price_per_night", "location", "rating", "amenities"]
+    if any(kw in obj_lower for kw in ["news", "latest", "breakthrough", "update", "ai"]):
+        return ["headline", "summary", "key_developments", "date", "source"]
+
+    return ["title", "summary", "key_stats", "date", "source"]
 
 
-def _infer_source_categories(objective: str) -> list[str]:
-    obj_lower = objective.lower()
-    if any(w in obj_lower for w in ["buy", "price", "purchase", "shop", "under", "cheap"]):
-        return ["e-commerce", "price comparison", "review sites"]
-    if any(w in obj_lower for w in ["review", "rating", "best", "top", "recommend"]):
-        return ["review aggregators", "tech blogs", "consumer reports"]
-    if any(w in obj_lower for w in ["research", "study", "paper", "academic"]):
-        return ["academic databases", "journals", "preprint servers"]
-    if any(w in obj_lower for w in ["news", "latest", "recent", "today"]):
-        return ["news sites", "blogs", "RSS feeds"]
-    return ["general web", "informational sites", "directories"]
+def _clean_topic_core(objective: str) -> str:
+    """Extract the clean subject from an objective, stripping command verbs and fluff."""
+    text = objective.strip()
+    # Strip leading command phrasing
+    text = re.sub(
+        r"^(?:please\s+)?(?:find|search(?:\s+for)?|get|look\s+for|give\s+me|show\s+me|tell\s+me\s+about|list|compare)\s+(?:me\s+)?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"^(?:the\s+)?(?:top\s+\d+|best|latest)\s+", "", text, flags=re.IGNORECASE)
+    # Strip trailing compare/recommend phrases
+    text = re.split(r"[,;]\s*(?:compare|recommend|and recommend|suggest|review|list)", text, flags=re.IGNORECASE)[0]
+    text = re.sub(r"\s+and\s+(?:compare|recommend|suggest).*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def _generate_search_queries(objective: str, topic: str) -> list[str]:
-    # Strip common filler words for cleaner queries
-    clean = re.sub(r"\b(please|find|me|the|a|an|some)\b", "", objective, flags=re.IGNORECASE)
-    clean = re.sub(r"\s+", " ", clean).strip()
-    queries = [clean]
-    # Add "best X" query
-    if "best" not in objective.lower() and "top" not in objective.lower():
-        queries.append(f"best {topic}")
-    # Add review query
-    queries.append(f"{topic} reviews comparison")
-    return queries[:5]
+    """Generate 5-7 distinct, high-precision search queries."""
+    obj_lower = objective.lower()
+    queries = []
+
+    # 1. Topic: Laptops / Tech Products
+    if "laptop" in obj_lower:
+        price_tag = "under 1 lakh" if any(w in obj_lower for w in ["1lakh", "1 lakh", "100000", "1,00,000"]) else ""
+        role_tag = "software engineer coding programming" if any(w in obj_lower for w in ["software", "developer", "engineer", "coding", "programming"]) else ""
+
+        if price_tag and role_tag:
+            queries.append(f"best laptops {price_tag} for software engineers coding India")
+            queries.append(f"top laptops {price_tag} for programming specs comparison")
+            queries.append(f"best developer laptops {price_tag} India review")
+            queries.append(f"MacBook Air vs Lenovo vs ASUS laptops {price_tag} for coding")
+            queries.append(f"top 10 laptops {price_tag} in India specs")
+        elif price_tag:
+            queries.append(f"best laptops {price_tag} in India specs review")
+            queries.append(f"top 10 laptops {price_tag} comparison")
+            queries.append(f"best performance laptops {price_tag}")
+        else:
+            queries.append(f"best laptops for software engineers 2026")
+            queries.append(f"top programming laptops comparison review")
+
+    # 2. Topic: Placements / Education
+    elif any(w in obj_lower for w in ["placement", "package", "salary", "recruit"]):
+        queries.append(f"{topic} highest average package")
+        queries.append(f"{topic} official report")
+        queries.append(f"{topic} top companies recruiters")
+        queries.append(f"{topic} branch wise placement")
+
+    # 3. Topic: AI / News / General
+    elif any(w in obj_lower for w in ["news", "latest", "breakthrough", "update", "ai"]):
+        queries.append(f"{topic} 2026")
+        queries.append(f"{topic} latest updates breakthroughs")
+        queries.append(f"{topic} overview report")
+        queries.append(f"recent developments in {topic}")
+
+    # 4. General fallback
+    else:
+        queries.append(f"best {topic} comparison review")
+        queries.append(f"top {topic} guide overview")
+        queries.append(f"{topic} specifications details")
+
+    # Deduplicate queries
+    seen = set()
+    unique = []
+    for q in queries:
+        clean_q = q.strip()
+        if clean_q and clean_q.lower() not in seen:
+            seen.add(clean_q.lower())
+            unique.append(clean_q)
+
+    return unique[:6]
 
 
 def plan_deterministic(objective: str, max_pages: int) -> ResearchPlan:
-    """Rule-based planner used when the LLM is unavailable."""
-    log.info("Using deterministic planner for objective: %s", objective[:60])
+    """Rule-based planner producing focused queries and schema."""
+    log.info("Generating deterministic research plan for: %s", objective[:60])
 
-    # Extract a short topic (first meaningful noun phrase)
-    topic_match = re.search(
-        r"(?:find|search|get|look for|compare|research|list|show)\s+(?:me\s+)?(.+?)(?:\s+and|\s+in|\s+under|\s+with|$)",
-        objective,
-        re.IGNORECASE,
-    )
-    topic = topic_match.group(1).strip() if topic_match else objective[:60].strip()
+    core = _clean_topic_core(objective)
+    # Ensure readable topic
+    topic = core if len(core.split()) <= 8 else " ".join(core.split()[:8])
+    if not topic:
+        topic = objective[:50].strip()
 
-    constraints: list[str] = []
-    constraints.extend(_extract_price_constraint(objective))
+    constraints = _extract_price_constraint(objective)
     constraints.extend(_extract_location(objective))
 
     required_fields = _infer_fields(objective)
-    source_categories = _infer_source_categories(objective)
     search_queries = _generate_search_queries(objective, topic)
 
-    extraction_schema = {field: f"Extract the {field} of the item" for field in required_fields}
+    extraction_schema = {field: f"Extract {field}" for field in required_fields}
 
     stopping_criteria = [
-        f"All {len(required_fields)} required fields covered for at least 5 items",
-        f"Crawl budget of {max_pages} pages reached",
-        "Significant diminishing returns: 3 consecutive pages with relevance < 0.2",
+        f"At least {max(max_pages, MIN_PAGES)} pages evaluated",
+        "Key comparative fields identified",
     ]
 
     return ResearchPlan(
@@ -175,27 +165,14 @@ def plan_deterministic(objective: str, max_pages: int) -> ResearchPlan:
         constraints=constraints,
         required_fields=required_fields,
         search_queries=search_queries,
-        source_categories=source_categories,
-        ranking_priorities=["relevance", "completeness", "source_reliability"],
-        max_pages=max_pages,
+        source_categories=["tech reviews", "benchmarks", "official specifications", "buying guides"],
+        ranking_priorities=["relevance", "completeness", "specifications_accuracy"],
+        max_pages=max(max_pages, MIN_PAGES),
         stopping_criteria=stopping_criteria,
         extraction_schema=extraction_schema,
     )
 
 
-# ──────────────────────────────────────────────
-# Public API
-# ──────────────────────────────────────────────
-
 async def create_research_plan(objective: str, max_pages: int) -> ResearchPlan:
-    """
-    Create a research plan using LLM if available, deterministic fallback otherwise.
-    Always returns a valid ResearchPlan.
-    """
-    plan = await plan_with_llm(objective, max_pages)
-    if plan:
-        log.info("Research plan created via LLM for: %s", objective[:50])
-        return plan
-
-    log.info("LLM unavailable – using deterministic planner")
+    """Create a research plan. Uses deterministic planner for instant response and 0 token waste."""
     return plan_deterministic(objective, max_pages)

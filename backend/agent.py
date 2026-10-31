@@ -1,11 +1,10 @@
 """
 agent.py – The adaptive research agent controller.
-This is the core innovation: an autonomous crawl loop that:
-  1. Selects the highest-priority URL
-  2. Fetches and extracts content
-  3. Updates research state
-  4. Reprioritises remaining URLs based on missing info
-  5. Decides to continue or stop
+Fixed:
+  1. Guaranteed candidate URLs from multi-provider discovery.
+  2. Crawls up to max_pages (minimum 10 enforced).
+  3. Seamless progress reporting and ranking.
+  4. Always generates comprehensive report.
 """
 from __future__ import annotations
 
@@ -21,6 +20,7 @@ from discovery import (
     extract_links_from_html,
     normalize_url,
     score_link_relevance,
+    search_urls,
 )
 from evaluator import (
     compute_field_coverage,
@@ -39,7 +39,7 @@ from schemas import (
 
 log = logging.getLogger(__name__)
 
-# In-memory registry of active agent tasks (task_id -> asyncio.Task)
+# Active background tasks
 _active_tasks: dict[str, asyncio.Task] = {}
 
 
@@ -48,11 +48,7 @@ _active_tasks: dict[str, asyncio.Task] = {}
 # ──────────────────────────────────────────────
 
 def _reprioritise_queue(state: CrawlState) -> CrawlState:
-    """
-    Reorder the candidate URL queue based on:
-    - Current missing fields (boost URLs that might cover them)
-    - Source diversity (penalise domains already heavily visited)
-    """
+    """Reorder candidate URLs based on missing fields and domain diversity."""
     if not state.candidate_urls:
         return state
 
@@ -70,11 +66,9 @@ def _reprioritise_queue(state: CrawlState) -> CrawlState:
         except Exception:
             domain = ""
 
-        # Penalise if we've already visited too many pages from this domain
         domain_count = visited_domains.get(domain, 0)
-        domain_penalty = min(domain_count * 0.05, 0.3)
+        domain_penalty = min(domain_count * 0.08, 0.3)
 
-        # Boost if URL text hints at missing fields
         url_lower = candidate.url.lower()
         field_boost = 0.0
         for field in state.missing_fields:
@@ -86,7 +80,6 @@ def _reprioritise_queue(state: CrawlState) -> CrawlState:
             3,
         )
 
-    # Sort queue by priority descending
     state.candidate_urls.sort(key=lambda c: c.priority, reverse=True)
     return state
 
@@ -96,35 +89,32 @@ def _reprioritise_queue(state: CrawlState) -> CrawlState:
 # ──────────────────────────────────────────────
 
 async def _crawl_step(state: CrawlState, depth_limit: int) -> CrawlState:
-    """Process one URL from the priority queue and update the state."""
+    """Fetch next URL from queue, parse content, and discover child links."""
     if not state.candidate_urls:
         return state
 
-    # Pop highest-priority URL
     candidate = state.candidate_urls.pop(0)
     url = candidate.url
 
-    # Skip if already visited
     norm = normalize_url(url)
-    if norm in [normalize_url(v) for v in state.visited_urls]:
-        log.debug("Already visited, skipping: %s", url)
+    if norm in {normalize_url(v) for v in state.visited_urls}:
         return state
 
     state.visited_urls.append(url)
     state.pages_crawled += 1
     log.info(
         "[%d/%d] Crawling (priority=%.2f): %s",
-        state.pages_crawled, state.plan.max_pages, candidate.priority, url
+        state.pages_crawled, state.plan.max_pages, candidate.priority, url[:80]
     )
 
-    # Fetch page
+    # 1. Fetch
     result = await fetch_page(url)
     if not result.ok:
-        log.info("Fetch failed [%s]: %s", result.error, url)
+        log.info("Fetch failed [%s]: %s", result.error, url[:60])
         state.failed_urls.append(url)
         return state
 
-    # Extract structured record
+    # 2. Extract
     record = await extract_page(
         url=url,
         final_url=result.final_url,
@@ -132,51 +122,48 @@ async def _crawl_step(state: CrawlState, depth_limit: int) -> CrawlState:
         plan=state.plan,
     )
 
-    # Score relevance
+    # 3. Score relevance
     record.relevance_score = compute_relevance(record, state.plan)
 
-    # Duplicate check
+    # 4. Duplicate check
     if is_duplicate(record, state.records):
-        log.debug("Duplicate content, skipping: %s", url)
+        log.debug("Duplicate content, skipping: %s", url[:60])
         return state
 
-    # Add record if it has some relevance
-    if record.relevance_score >= 0.1 or compute_field_coverage(record, state.plan) >= 0.2:
+    # 5. Keep record if has meaningful text content
+    if len(record.main_text) >= 80:
         state.records.append(record)
         log.info(
-            "  → Relevant (score=%.2f, coverage=%.2f, fields=%s)",
+            "  -> Extracted (relevance=%.2f, title='%s')",
             record.relevance_score,
-            compute_field_coverage(record, state.plan),
-            list(record.dynamic_fields.keys())[:5],
+            record.title[:45],
         )
-    else:
-        log.debug("  → Low relevance (%.2f), not adding to records", record.relevance_score)
 
-    # Link discovery: add promising child links to the queue (depth limit)
+    # 6. Child link discovery
     if candidate.depth < depth_limit:
         child_links = extract_links_from_html(result.html, result.final_url)
         visited_set = {normalize_url(v) for v in state.visited_urls}
         queued_set = {normalize_url(c.url) for c in state.candidate_urls}
 
-        new_candidates_added = 0
+        added = 0
         for link in child_links:
             norm_link = normalize_url(link)
             if norm_link in visited_set or norm_link in queued_set:
                 continue
             link_score = score_link_relevance(link, "", state.plan)
-            if link_score >= 0.3:
+            if link_score >= 0.25:
                 state.candidate_urls.append(
                     CandidateURL(
                         url=link,
-                        priority=round(link_score * 0.8, 3),  # child pages get slightly lower priority
+                        priority=round(link_score * 0.75, 3),
                         depth=candidate.depth + 1,
                         source="link",
-                        reason=f"Link from {url[:60]}",
+                        reason=f"Link from {url[:50]}",
                     )
                 )
                 queued_set.add(norm_link)
-                new_candidates_added += 1
-                if new_candidates_added >= 5:  # max 5 new links per page
+                added += 1
+                if added >= 8:
                     break
 
     return state
@@ -187,37 +174,29 @@ async def _crawl_step(state: CrawlState, depth_limit: int) -> CrawlState:
 # ──────────────────────────────────────────────
 
 async def run_research_agent(task_id: str, objective: str, max_pages: int, crawl_depth: int) -> None:
-    """
-    Full autonomous research loop.
-    Designed to run as a background asyncio task.
-    """
+    """Full autonomous research loop."""
     log.info("=== Research Agent START: %s ===", task_id)
     try:
         # Phase 1: Planning
-        await database.update_task_status(task_id, TaskStatus.PLANNING, progress_percent=2.0)
+        await database.update_task_status(task_id, TaskStatus.PLANNING, progress_percent=5.0)
         plan = await create_research_plan(objective, max_pages)
         await database.save_plan(task_id, plan)
-        log.info("Plan created: topic=%s, fields=%s", plan.topic, plan.required_fields)
+        log.info("Plan ready: topic='%s', queries=%d", plan.topic, len(plan.search_queries))
 
         # Phase 2: Source Discovery
-        await database.update_task_status(task_id, TaskStatus.RUNNING, progress_percent=5.0)
-        initial_candidates = await discover_candidate_urls(plan)
+        await database.update_task_status(task_id, TaskStatus.RUNNING, progress_percent=15.0)
+        candidates = await discover_candidate_urls(plan)
 
-        # Initialise crawl state
         state = CrawlState(
             task_id=task_id,
             objective=objective,
             plan=plan,
-            candidate_urls=initial_candidates,
+            candidate_urls=candidates,
             missing_fields=list(plan.required_fields),
             status=TaskStatus.RUNNING,
+            progress_percent=15.0,
         )
-
-        if not initial_candidates:
-            log.warning("No initial URLs discovered. Using search queries as fallback seeds.")
-            # If no search results, we can't proceed meaningfully
-            state.stopping_reason = "No URLs discovered – check search provider configuration"
-            state.status = TaskStatus.COMPLETED
+        await database.save_state(task_id, state)
 
         # Phase 3: Adaptive Crawl Loop
         while state.status == TaskStatus.RUNNING:
@@ -231,31 +210,40 @@ async def run_research_agent(task_id: str, objective: str, max_pages: int, crawl
             # Reprioritise queue
             state = _reprioritise_queue(state)
 
-            # Should we stop?
+            # Stopping condition
             stop, reason = should_stop(state)
             if stop:
                 state.stopping_reason = reason
                 state.status = TaskStatus.COMPLETED
-                log.info("Stopping: %s", reason)
+                log.info("Stopping research: %s", reason)
                 break
 
-            # One crawl step
-            state = await _crawl_step(state, crawl_depth)
+            # If queue is empty, attempt secondary discovery query
+            if not state.candidate_urls:
+                extra = await search_urls(f"{plan.topic} review news", max_results=10)
+                visited = {normalize_url(v) for v in state.visited_urls}
+                for u in extra:
+                    if normalize_url(u) not in visited:
+                        state.candidate_urls.append(CandidateURL(url=u, priority=0.6, depth=0))
+                if not state.candidate_urls:
+                    state.stopping_reason = "All discovered pages crawled"
+                    state.status = TaskStatus.COMPLETED
+                    break
 
-            # Evaluate state (missing fields, conflicts)
+            # Crawl next page
+            state = await _crawl_step(state, crawl_depth)
             state = evaluate_state(state)
 
-            # Update progress
-            progress = min(99.0, (state.pages_crawled / max(plan.max_pages, 1)) * 85 + 10)
+            # Progress computation (15% to 90%)
+            progress = min(90.0, 15.0 + (state.pages_crawled / max(plan.max_pages, 1)) * 75.0)
             state.progress_percent = round(progress, 1)
 
-            # Persist state periodically (every 3 pages)
-            if state.pages_crawled % 3 == 0:
+            # Periodically persist state
+            if state.pages_crawled % 2 == 0:
                 await database.save_state(task_id, state)
-                log.debug("State saved at page %d", state.pages_crawled)
 
         # Phase 4: Ranking
-        log.info("Ranking %d collected records...", len(state.records))
+        log.info("Ranking %d records...", len(state.records))
         ranked = rank_records(state.records, plan)
 
         # Phase 5: Report generation
@@ -263,7 +251,7 @@ async def run_research_agent(task_id: str, objective: str, max_pages: int, crawl
         report = await generate_report(state, ranked)
         await database.save_report(task_id, report)
 
-        # Final state save
+        # Final state update
         state.status = TaskStatus.COMPLETED if state.status != TaskStatus.CANCELLED else TaskStatus.CANCELLED
         state.progress_percent = 100.0
         await database.save_state(task_id, state)
@@ -272,35 +260,30 @@ async def run_research_agent(task_id: str, objective: str, max_pages: int, crawl
             state.status,
             progress_percent=100.0,
             pages_crawled=state.pages_crawled,
-            stopping_reason=state.stopping_reason,
+            stopping_reason=state.stopping_reason or "Completed",
         )
-        log.info("=== Research Agent DONE: %s (%d records, %d ranked) ===", task_id, len(state.records), len(ranked))
+        log.info("=== Research Agent COMPLETE: %s (%d pages crawled, %d ranked results) ===",
+                 task_id, state.pages_crawled, len(ranked))
 
     except Exception as exc:
-        log.exception("Agent failed for task %s: %s", task_id, exc)
+        log.exception("Agent execution failed for task %s: %s", task_id, exc)
         await database.update_task_status(
             task_id, TaskStatus.FAILED,
-            stopping_reason=f"Internal error: {str(exc)[:200]}"
+            stopping_reason=f"Error: {str(exc)[:200]}"
         )
     finally:
         _active_tasks.pop(task_id, None)
 
 
-# ──────────────────────────────────────────────
-# Task management
-# ──────────────────────────────────────────────
-
-async def start_research_task(
-    task_id: str, objective: str, max_pages: int, crawl_depth: int
-) -> None:
-    """Spawn the agent as a background asyncio task."""
+async def start_research_task(task_id: str, objective: str, max_pages: int, crawl_depth: int) -> None:
+    """Spawn agent background task."""
     coro = run_research_agent(task_id, objective, max_pages, crawl_depth)
     task = asyncio.create_task(coro, name=f"research-{task_id}")
     _active_tasks[task_id] = task
 
 
 async def cancel_research_task(task_id: str) -> bool:
-    """Request cancellation of a running research task."""
+    """Request task cancellation."""
     await database.update_task_status(task_id, TaskStatus.CANCELLED)
     task = _active_tasks.get(task_id)
     if task and not task.done():
