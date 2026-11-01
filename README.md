@@ -1,6 +1,6 @@
 # Autonomous Web Research
 
-A small research app: it searches the web through Crawl4AI, extracts relevant page text, summarizes it with the local BART checkpoint, and displays the report in readable sections.
+A small research app: it searches the web through Crawl4AI, extracts relevant page text, summarizes it with the BART checkpoint, and displays the report in readable sections.
 
 ## Backend layout
 
