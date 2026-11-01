@@ -1,4 +1,4 @@
-"""Small async client for the self-hosted Crawl4AI Docker API."""
+"""Small async client for the local Crawl4AI Python API."""
 from __future__ import annotations
 
 import re

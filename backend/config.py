@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite+aiosqlite:///./research.db"
 
-    # Self-hosted Crawl4AI Docker API (search is handled by the app; scraping
-    # goes through the local Crawl4AI service).
+    # Local Crawl4AI Python service (search is handled by the app; scraping
+    # goes through the REST wrapper in crawl4ai_server.py).
     crawl4ai_api_base: str = "http://localhost:11235"
     crawl4ai_api_token: str = ""
 

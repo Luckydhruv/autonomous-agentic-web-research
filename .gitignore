@@ -66,6 +66,9 @@ coverage.xml
 
 # Playwright
 playwright-browsers/
+.crawl4ai/
+.crawl4ai.pid
+.crawl4ai.log
 # Python
 __pycache__/
 *.py[cod]

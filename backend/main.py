@@ -77,7 +77,7 @@ async def get_config() -> dict:
     return {
         "ollama_enabled": settings.ollama_enabled,
         "ollama_model": settings.ollama_model,
-        "crawler": "Crawl4AI local Docker API",
+        "crawler": "Crawl4AI local Python API",
         "crawl4ai_configured": bool(settings.crawl4ai_api_token.strip()),
         "crawl4ai_api_base": settings.crawl4ai_api_base,
         "default_max_pages": settings.default_max_pages,

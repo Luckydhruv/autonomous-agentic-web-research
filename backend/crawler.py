@@ -1,4 +1,4 @@
-"""Adapter from the local Crawl4AI Docker API to the research agent."""
+"""Adapter from the local Crawl4AI Python API to the research agent."""
 from __future__ import annotations
 
 import html
