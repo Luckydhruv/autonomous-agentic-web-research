@@ -7,7 +7,12 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _as_dict(value: Any) -> dict:
+    """Normalize optional JSON objects before they reach dict operations."""
+    return value if isinstance(value, dict) else {}
 
 
 # ──────────────────────────────────────────────
@@ -38,6 +43,11 @@ class ResearchPlan(BaseModel):
     stopping_criteria: list[str] = Field(default_factory=list)
     extraction_schema: dict[str, str] = Field(default_factory=dict)
 
+    @field_validator("extraction_schema", mode="before")
+    @classmethod
+    def normalize_extraction_schema(cls, value: Any) -> dict:
+        return _as_dict(value)
+
 
 # ──────────────────────────────────────────────
 # Evidence & Extracted Records
@@ -55,6 +65,8 @@ class ExtractedRecord(BaseModel):
     domain: str
     title: str
     main_text: str
+    page_summary: str = ""
+    relevant_text: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     published_date: Optional[str] = None
     collected_at: datetime = Field(default_factory=datetime.utcnow)
@@ -62,6 +74,11 @@ class ExtractedRecord(BaseModel):
     relevance_score: float = Field(default=0.0, ge=0.0, le=1.0)
     field_coverage: dict[str, bool] = Field(default_factory=dict)
     dynamic_fields: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("metadata", "field_coverage", "dynamic_fields", mode="before")
+    @classmethod
+    def normalize_record_mappings(cls, value: Any) -> dict:
+        return _as_dict(value)
 
 
 # ──────────────────────────────────────────────
@@ -72,8 +89,10 @@ class CandidateURL(BaseModel):
     url: str
     priority: float = Field(default=0.5, ge=0.0, le=1.0)
     depth: int = 0
-    source: str = "discovery"   # discovery | link | seed
+    source: str = "discovery"   # discovery | link | seed | fallback
     reason: str = ""
+    title: Optional[str] = None
+    snippet: Optional[str] = None
 
 
 class CrawlState(BaseModel):
@@ -84,6 +103,7 @@ class CrawlState(BaseModel):
     visited_urls: list[str] = Field(default_factory=list)
     failed_urls: list[str] = Field(default_factory=list)
     records: list[ExtractedRecord] = Field(default_factory=list)
+    fallback_record: Optional[ExtractedRecord] = None
     missing_fields: list[str] = Field(default_factory=list)
     conflicting_fields: list[str] = Field(default_factory=list)
     pages_crawled: int = 0
@@ -108,6 +128,11 @@ class RankedResult(BaseModel):
     evidence_snippets: list[EvidenceSnippet] = Field(default_factory=list)
     published_date: Optional[str] = None
 
+    @field_validator("score_breakdown", "dynamic_fields", mode="before")
+    @classmethod
+    def normalize_result_mappings(cls, value: Any) -> dict:
+        return _as_dict(value)
+
 
 # ──────────────────────────────────────────────
 # Research Report
@@ -117,6 +142,11 @@ class ResearchReport(BaseModel):
     task_id: str
     objective: str
     executive_summary: str
+    report_narrative: str = ""
+    top_source_title: str = ""
+    top_source_url: str = ""
+    relevant_source_text: str = ""
+    bart_summary: str = ""
     methodology: str
     ranked_results: list[RankedResult] = Field(default_factory=list)
     comparison_table: list[dict[str, Any]] = Field(default_factory=list)
@@ -127,6 +157,11 @@ class ResearchReport(BaseModel):
     crawl_stats: dict[str, Any] = Field(default_factory=dict)
     generated_at: datetime = Field(default_factory=datetime.utcnow)
     confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @field_validator("crawl_stats", mode="before")
+    @classmethod
+    def normalize_crawl_stats(cls, value: Any) -> dict:
+        return _as_dict(value)
 
 
 # ──────────────────────────────────────────────

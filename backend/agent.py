@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from urllib.parse import urlparse
 
 import database
@@ -18,7 +19,7 @@ from config import settings
 from crawler import fetch_page
 from discovery import (
     discover_candidate_urls,
-    extract_links_from_html,
+    extract_link_candidates_from_html,
     normalize_url,
     score_link_relevance,
 )
@@ -29,12 +30,14 @@ from evaluator import (
     is_duplicate,
     should_stop,
 )
+from content_utils import has_useful_content, is_non_article_page
+from offline_sources import cached_fallback_records
 from extractor import extract_page
 from planner import create_research_plan
 from ranking import rank_records
 from reporter import generate_report
 from schemas import (
-    CandidateURL, CrawlState, TaskStatus
+    CandidateURL, CrawlState, EvidenceSnippet, ExtractedRecord, ResearchPlan, TaskStatus
 )
 
 log = logging.getLogger(__name__)
@@ -95,6 +98,63 @@ def _reprioritise_queue(state: CrawlState) -> CrawlState:
 # Single crawl step
 # ──────────────────────────────────────────────
 
+def search_preview_record(candidate: CandidateURL, plan: ResearchPlan) -> ExtractedRecord | None:
+    """Build a labeled source record from a search-engine result preview."""
+    title = (candidate.title or "").strip()
+    snippet = (candidate.snippet or "").strip()
+    if not title or not snippet or len(snippet.split()) < 8:
+        return None
+    lower_snippet = snippet.casefold()
+    generic_copy = any(
+        phrase in lower_snippet
+        for phrase in (
+            "this guide will walk you through",
+            "learn more about our",
+            "visit our website to learn",
+            "we are here to help you",
+            "discover everything you need to know",
+        )
+    )
+    specific_detail = bool(
+        re.search(r"\b\d+\b", snippet)
+        or re.search(r"\b(examples?|questions?|steps?|principles|checklist|star method|case study)\b", lower_snippet)
+    )
+    preview_quality = 0.15 if generic_copy else min(
+        0.85, 0.25 + min(len(snippet.split()), 40) * 0.01 + (0.25 if specific_detail else 0.0)
+    )
+    url = candidate.url
+    preview_text = f"{title}\n{snippet}"
+    host = urlparse(url).netloc.lower()
+    preview = ExtractedRecord(
+        url=url,
+        domain=host,
+        title=title[:300],
+        main_text=preview_text[:3000],
+        relevant_text=preview_text[:3000],
+        metadata={
+            "retrieval_mode": "search_preview",
+            "preview_quality": round(preview_quality, 2),
+            "actionable_detail": specific_detail and not generic_copy,
+            "notice": "Search-result preview; the linked article could not be fetched.",
+        },
+        evidence_snippets=[
+            EvidenceSnippet(text=snippet[:500], source_url=url, confidence=0.4)
+        ],
+    )
+    preview.relevance_score = compute_relevance(preview, plan)
+    return preview
+
+
+def _keep_preview(state: CrawlState, candidate: CandidateURL) -> None:
+    preview = search_preview_record(candidate, state.plan)
+    if not preview:
+        return
+    quality = float(preview.metadata.get("preview_quality", 0.0))
+    if preview.relevance_score >= 0.15 and quality >= 0.38 and not any(r.url == preview.url for r in state.records):
+        state.records.append(preview)
+    if state.fallback_record is None or preview.relevance_score > state.fallback_record.relevance_score:
+        state.fallback_record = preview
+
 async def _crawl_step(state: CrawlState, depth_limit: int) -> CrawlState:
     """Process one URL from the priority queue and update the state."""
     if not state.candidate_urls:
@@ -111,18 +171,18 @@ async def _crawl_step(state: CrawlState, depth_limit: int) -> CrawlState:
         return state
 
     state.visited_urls.append(url)
-    state.pages_crawled += 1
-    log.info(
-        "[%d/%d] Crawling (priority=%.2f): %s",
-        state.pages_crawled, state.plan.max_pages, candidate.priority, url
-    )
-
     # Fetch page
     result = await fetch_page(url)
     if not result.ok:
         log.info("Fetch failed [%s]: %s", result.error, url)
         state.failed_urls.append(url)
+        # A search-result preview is still source text tied to the original
+        # article URL. Keep it as a clearly labeled low-confidence result so a
+        # blocked article does not make the whole task appear empty.
+        _keep_preview(state, candidate)
         return state
+
+    state.pages_crawled += 1
 
     # Extract structured record
     record = await extract_page(
@@ -140,8 +200,20 @@ async def _crawl_step(state: CrawlState, depth_limit: int) -> CrawlState:
         log.debug("Duplicate content, skipping: %s", url)
         return state
 
-    # Add record if it has some relevance
-    if record.relevance_score >= 0.1 or compute_field_coverage(record, state.plan) >= 0.2:
+    useful_text = record.relevant_text or record.main_text
+    if has_useful_content(useful_text) and (
+        state.fallback_record is None
+        or record.relevance_score > state.fallback_record.relevance_score
+    ):
+        state.fallback_record = record
+
+    # Retain topical pages with substantive extracted text. Field labels appearing
+    # in a navigation menu are not enough to make a page a research result.
+    if (
+        record.relevance_score >= 0.30
+        and has_useful_content(record.relevant_text)
+        and not is_non_article_page(record.url, record.title)
+    ):
         state.records.append(record)
         log.info(
             "  → Relevant (score=%.2f, coverage=%.2f, fields=%s)",
@@ -151,20 +223,23 @@ async def _crawl_step(state: CrawlState, depth_limit: int) -> CrawlState:
         )
     else:
         log.debug("  → Low relevance (%.2f), not adding to records", record.relevance_score)
+        # A fetched page may be a consent/blocked page with no usable article
+        # body. Retain its matching search preview as a last-resort source row.
+        _keep_preview(state, candidate)
 
     # Link discovery: add promising child links to the queue (depth limit)
     if candidate.depth < depth_limit:
-        child_links = extract_links_from_html(result.html, result.final_url)
+        child_links = extract_link_candidates_from_html(result.html, result.final_url)
         visited_set = {normalize_url(v) for v in state.visited_urls}
         queued_set = {normalize_url(c.url) for c in state.candidate_urls}
 
         new_candidates_added = 0
-        for link in child_links:
+        for link, anchor_text in child_links:
             norm_link = normalize_url(link)
             if norm_link in visited_set or norm_link in queued_set:
                 continue
-            link_score = score_link_relevance(link, "", state.plan)
-            if link_score >= 0.3:
+            link_score = score_link_relevance(link, anchor_text, state.plan)
+            if link_score >= 0.2:
                 state.candidate_urls.append(
                     CandidateURL(
                         url=link,
@@ -176,7 +251,7 @@ async def _crawl_step(state: CrawlState, depth_limit: int) -> CrawlState:
                 )
                 queued_set.add(norm_link)
                 new_candidates_added += 1
-                if new_candidates_added >= 5:  # max 5 new links per page
+                if new_candidates_added >= 8:  # max 8 new links per page
                     break
 
     return state
@@ -212,6 +287,9 @@ async def run_research_agent(task_id: str, objective: str, max_pages: int, crawl
             missing_fields=list(plan.required_fields),
             status=TaskStatus.RUNNING,
         )
+        # Publish the discovered queue immediately so the UI does not look
+        # empty while it is fetching and extracting the first source.
+        await database.save_state(task_id, state)
 
         if not initial_candidates:
             log.warning("No initial URLs discovered. Using search queries as fallback seeds.")
@@ -249,12 +327,22 @@ async def run_research_agent(task_id: str, objective: str, max_pages: int, crawl
             progress = min(99.0, (state.pages_crawled / max(plan.max_pages, 1)) * 85 + 10)
             state.progress_percent = round(progress, 1)
 
-            # Persist state periodically (every 3 pages)
-            if state.pages_crawled % 3 == 0:
-                await database.save_state(task_id, state)
-                log.debug("State saved at page %d", state.pages_crawled)
+            # Persist each crawl step so sources and results appear as soon as
+            # they are found, including when the first few page fetches fail.
+            await database.save_state(task_id, state)
 
         # Phase 4: Ranking
+        if not state.records and state.fallback_record is not None:
+            log.info("No page met the topical threshold; keeping the best readable page as a fallback result")
+            state.records.append(state.fallback_record)
+        if not state.records:
+            cached_records = cached_fallback_records(plan)
+            if cached_records:
+                log.warning("Live discovery/fetching produced no records; using labeled cached source text")
+                state.records.extend(cached_records)
+                state.fallback_record = cached_records[0]
+                state.stopping_reason = "Live page fetches failed; labeled cached source text used"
+                state = evaluate_state(state)
         log.info("Ranking %d collected records...", len(state.records))
         ranked = rank_records(state.records, plan)
 

@@ -2,7 +2,8 @@ fastapi
 uvicorn[standard]
 pydantic
 pydantic-settings
-sqlalchemy
+sqlalchemy[asyncio]
+greenlet
 aiosqlite
 httpx
 beautifulsoup4
@@ -10,3 +11,8 @@ python-dotenv
 tldextract
 pytest
 pytest-asyncio
+duckduckgo-search
+primp
+lxml
+transformers
+torch

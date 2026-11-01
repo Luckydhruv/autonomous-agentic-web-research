@@ -10,6 +10,7 @@ import re
 from datetime import datetime, timezone
 
 from schemas import CrawlState, ExtractedRecord, ResearchPlan
+from content_utils import extract_relevant_text
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +65,10 @@ def compute_relevance(record: ExtractedRecord, plan: ResearchPlan) -> float:
     Relevance score 0–1 based on keyword overlap between page content
     and the research topic / constraints.
     """
-    text = (record.title + " " + record.main_text).lower()
+    relevant_text = record.relevant_text or extract_relevant_text(
+        record.main_text, plan.topic, record.title
+    )
+    text = (record.title + " " + relevant_text).lower()
     topic_words = re.findall(r"\w+", plan.topic.lower())
     constraint_words = []
     for c in plan.constraints:
@@ -73,15 +77,38 @@ def compute_relevance(record: ExtractedRecord, plan: ResearchPlan) -> float:
     if not topic_words:
         return 0.5
 
-    # Topic keyword hits
-    topic_hits = sum(1 for w in topic_words if len(w) > 3 and w in text)
-    topic_score = min(topic_hits / max(len([w for w in topic_words if len(w) > 3]), 1), 1.0)
+    stop_words = {"the", "and", "for", "with", "from", "that", "this", "are", "was", "about", "find", "search", "get", "give", "latest", "today", "please"}
+    # Keep words >= 2 chars (preserves 'ai', 'ml')
+    meaningful_topic = [w for w in topic_words if len(w) >= 2 and w not in stop_words]
+    meaningful_constraints = [w for w in constraint_words if len(w) >= 2 and w not in stop_words]
+
+    if not meaningful_topic:
+        return 0.5
+
+    # Whole-word matches prevent terms like "AI" matching "email" or "chair".
+    topic_hits = 0
+    for w in meaningful_topic:
+        if re.search(rf"(?<!\w){re.escape(w)}(?!\w)", text):
+            topic_hits += 1
+            if len(w) > 3 and len(re.findall(rf"(?<!\w){re.escape(w)}(?!\w)", text)) >= 3:
+                topic_hits += 0.5
+
+    topic_score = min(topic_hits / max(len(meaningful_topic), 1), 1.0)
+
+    # Also check search queries for relevance
+    query_boost = 0.0
+    for query in plan.search_queries[:3]:
+        q_words = [w for w in re.findall(r"\w+", query.lower()) if len(w) >= 3 and w not in stop_words]
+        q_hits = sum(1 for w in q_words if re.search(rf"(?<!\w){re.escape(w)}(?!\w)", text))
+        if q_words:
+            query_boost = max(query_boost, q_hits / len(q_words) * 0.3)
 
     # Constraint keyword hits (bonus)
-    constraint_hits = sum(1 for w in constraint_words if len(w) > 3 and w in text)
-    constraint_bonus = min(constraint_hits / max(len([w for w in constraint_words if len(w) > 3]), 1), 0.3)
+    constraint_hits = sum(1 for w in meaningful_constraints if w in text)
+    constraint_bonus = min(constraint_hits / max(len(meaningful_constraints), 1), 0.3) if meaningful_constraints else 0.0
 
-    return round(min(topic_score + constraint_bonus, 1.0), 3)
+    final_score = min(topic_score + constraint_bonus + query_boost, 1.0)
+    return round(final_score, 3)
 
 
 # ── Field coverage ────────────────────────────────────────────────────────────
@@ -90,7 +117,10 @@ def compute_field_coverage(record: ExtractedRecord, plan: ResearchPlan) -> float
     """Fraction of required fields that appear to be covered."""
     if not plan.required_fields:
         return 1.0
-    covered = sum(1 for v in record.field_coverage.values() if v)
+    covered = sum(
+        1 for field in plan.required_fields
+        if record.field_coverage.get(field, False)
+    )
     return round(covered / len(plan.required_fields), 3)
 
 
@@ -107,6 +137,7 @@ def compute_freshness(record: ExtractedRecord) -> float:
     now = datetime.now(timezone.utc)
     date_patterns = [
         r"(\d{4}-\d{2}-\d{2})",
+        r"([A-Za-z]+\s+\d{1,2},?\s+\d{4})",
         r"(\d{4})",
     ]
     for pat in date_patterns:
@@ -115,8 +146,10 @@ def compute_freshness(record: ExtractedRecord) -> float:
             try:
                 if len(m.group(1)) == 4:
                     pub = datetime(int(m.group(1)), 1, 1, tzinfo=timezone.utc)
-                else:
+                elif "-" in m.group(1):
                     pub = datetime.fromisoformat(m.group(1)).replace(tzinfo=timezone.utc)
+                else:
+                    pub = datetime.strptime(m.group(1).replace(",", ""), "%B %d %Y").replace(tzinfo=timezone.utc)
                 age_days = (now - pub).days
                 if age_days < 30:
                     return 1.0
@@ -166,7 +199,8 @@ def detect_conflicts(records: list[ExtractedRecord], field: str) -> list[str]:
     """
     values: dict[str, list[str]] = {}  # value -> [url, ...]
     for rec in records:
-        val = str(rec.dynamic_fields.get(field, "")).strip()
+        dynamic_fields = rec.dynamic_fields if isinstance(rec.dynamic_fields, dict) else {}
+        val = str(dynamic_fields.get(field, "")).strip()
         if val and val.lower() not in ("none", "null", ""):
             values.setdefault(val, []).append(rec.url)
 
@@ -197,8 +231,10 @@ def evaluate_state(state: CrawlState) -> CrawlState:
         # Re-score relevance
         rec.relevance_score = compute_relevance(rec, plan)
         # Update field coverage
+        dynamic_fields = rec.dynamic_fields if isinstance(rec.dynamic_fields, dict) else {}
+        rec.dynamic_fields = dynamic_fields
         rec.field_coverage = {
-            f: (f in rec.dynamic_fields or f.lower() in rec.main_text.lower())
+            f: bool(dynamic_fields.get(f))
             for f in plan.required_fields
         }
 
@@ -206,7 +242,10 @@ def evaluate_state(state: CrawlState) -> CrawlState:
     if plan.required_fields:
         state.missing_fields = [
             f for f in plan.required_fields
-            if not any(rec.field_coverage.get(f, False) for rec in state.records)
+            if not any(
+                isinstance(rec.field_coverage, dict) and rec.field_coverage.get(f, False)
+                for rec in state.records
+            )
         ]
     else:
         state.missing_fields = []

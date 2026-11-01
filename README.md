@@ -13,6 +13,7 @@ An AI-powered system that converts a natural-language research goal into an adap
 - **robots.txt compliance** and per-domain rate limiting
 - **Weighted ranking** — scores each result on relevance, source reliability, freshness, completeness, and constraint match
 - **Structured report** — executive summary, key findings, comparison table, crawl statistics, and confidence score
+- **Relevant source summary with BART** — filters boilerplate, ranks topic-matched passages, summarizes the best source locally in token-safe chunks, and shows both the extracted text and BART summary in the report
 - **Live progress** — frontend polls progress, sources, and ranked results while the agent is running
 - **Cancel support** — any running task can be cancelled from the UI
 
@@ -26,7 +27,7 @@ An AI-powered system that converts a natural-language research goal into an adap
 | Backend | Python 3.11+, FastAPI, SQLAlchemy (async), aiosqlite |
 | HTTP | httpx (async) |
 | Parsing | BeautifulSoup4 |
-| LLM | Ollama (local) · OpenAI-compatible cloud (optional) |
+| LLM | Ollama (local) · OpenAI-compatible cloud (optional) · BART page summarizer (local) |
 | Search | DuckDuckGo HTML scraping (default) · Serper API (optional) |
 | Database | SQLite (default) · PostgreSQL (via `DATABASE_URL`) |
 
@@ -57,6 +58,7 @@ backend (FastAPI)
 - Python 3.11 or later
 - Node.js 18 or later
 - *(Optional)* [Ollama](https://ollama.com) for local LLM
+- Python package dependencies for the local BART model (`transformers` and `torch`); the model weights download and cache on first use
 
 ---
 
@@ -126,6 +128,10 @@ CLOUD_LLM_API_KEY=your_key_here   # never commit this
 CLOUD_LLM_MODEL=gpt-4o-mini
 ```
 
+### Local BART page summarization
+
+The backend removes common page chrome, extracts topic-matched passages, ranks the pages, and summarizes the top-ranked source with `facebook/bart-large-cnn`. Long relevant passages are split into 900-token chunks and consolidated when needed. The report displays the selected source, relevant extracted text, and BART summary. Model files are cached locally; summarization does not require an API key or an expiring access token. The first run needs an internet connection to fetch model files. Configure `BART_ENABLED`, `BART_MODEL`, `BART_INPUT_TOKENS`, and `BART_SUMMARY_TOKENS` in `.env`; if model loading fails, the app keeps running and uses an extractive fallback.
+
 ### Serper search API (more reliable than DuckDuckGo scraping)
 
 ```
@@ -145,6 +151,10 @@ SERPER_API_KEY=your_key_here
 | `DATABASE_URL` | `sqlite:///./research.db` | Use a PostgreSQL URL for production |
 | `DEFAULT_MAX_PAGES` | `20` | Crawl budget per task |
 | `DEFAULT_CRAWL_DEPTH` | `2` | Max link-following depth |
+| `BART_ENABLED` | `true` | Use local BART to summarize each extracted page |
+| `BART_MODEL` | `facebook/bart-large-cnn` | Hugging Face model identifier, cached locally after download |
+| `BART_INPUT_TOKENS` | `900` | Per-chunk input budget, safely below BART's input limit |
+| `BART_SUMMARY_TOKENS` | `100` | Maximum tokens for each page chunk summary |
 | `EXTRA_BLOCKED_DOMAINS` | *(empty)* | Comma-separated extra SSRF blocklist |
 
 > **Security:** Never commit `.env` or any file containing API keys. `.env` is listed in `.gitignore`.

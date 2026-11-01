@@ -39,7 +39,10 @@ async def _call_ollama(prompt: str, json_mode: bool = False) -> Optional[str]:
             )
             resp.raise_for_status()
             data = resp.json()
-            return data.get("response", "").strip()
+            if not isinstance(data, dict):
+                return None
+            response_text = data.get("response")
+            return response_text.strip() if isinstance(response_text, str) else None
     except Exception as exc:
         log.warning("Ollama unavailable: %s", exc)
         return None

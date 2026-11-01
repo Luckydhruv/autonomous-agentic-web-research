@@ -108,12 +108,20 @@ def _infer_fields(objective: str) -> list[str]:
         ("recipe", "food", "dish", "cook"): [
             "name", "ingredients", "prep_time", "cook_time", "servings", "calories"
         ],
+        ("ai", "artificial intelligence", "machine learning", "ml", "llm", "gpt", "chatgpt", "openai"):
+            ["title", "summary", "date", "source", "impact", "category"],
+        ("news", "latest", "recent", "today", "breaking"):
+            ["title", "summary", "date", "source", "url", "category"],
+        ("stock", "market", "finance", "investment", "crypto"):
+            ["name", "price", "change", "volume", "market_cap", "date"],
+        ("health", "medical", "disease", "treatment", "drug"):
+            ["title", "summary", "source", "date", "evidence_level"],
     }
     for keywords, fields in field_map.items():
         if any(kw in obj_lower for kw in keywords):
             return fields
     # Generic fallback
-    return ["title", "description", "price", "rating", "date", "source"]
+    return ["title", "summary", "date", "source", "url"]
 
 
 def _infer_source_categories(objective: str) -> list[str]:
@@ -130,16 +138,44 @@ def _infer_source_categories(objective: str) -> list[str]:
 
 
 def _generate_search_queries(objective: str, topic: str) -> list[str]:
+    """Generate diverse, specific search queries for better coverage."""
     # Strip common filler words for cleaner queries
     clean = re.sub(r"\b(please|find|me|the|a|an|some)\b", "", objective, flags=re.IGNORECASE)
     clean = re.sub(r"\s+", " ", clean).strip()
+
+    obj_lower = objective.lower()
     queries = [clean]
-    # Add "best X" query
-    if "best" not in objective.lower() and "top" not in objective.lower():
+
+    # News / current events queries
+    if any(w in obj_lower for w in ["news", "latest", "recent", "today", "2024", "2025"]):
+        from datetime import datetime
+        year = datetime.now().year
+        queries = [
+            f"{topic} {year}",
+            f"{topic} news {year}",
+            f"latest {topic} updates {year}",
+            f"{topic} breakthroughs {year}",
+            f"{topic} site:techcrunch.com OR site:wired.com OR site:reuters.com",
+        ]
+    # AI / ML specific queries
+    elif any(w in obj_lower for w in ["ai", "artificial intelligence", "machine learning", "llm"]):
+        queries = [
+            f"{topic} 2025",
+            f"artificial intelligence breakthroughs 2025",
+            f"AI machine learning news site:techcrunch.com OR site:wired.com",
+            f"latest AI models tools 2025",
+            f"AI research papers announcements 2025",
+        ]
+    elif "best" not in obj_lower and "top" not in obj_lower:
         queries.append(f"best {topic}")
-    # Add review query
-    queries.append(f"{topic} reviews comparison")
-    return queries[:5]
+        queries.append(f"{topic} reviews comparison")
+
+    # Always deduplicate
+    seen_q: list[str] = []
+    for q in queries:
+        if q and q not in seen_q:
+            seen_q.append(q)
+    return seen_q[:5]
 
 
 def plan_deterministic(objective: str, max_pages: int) -> ResearchPlan:

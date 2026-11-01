@@ -21,8 +21,9 @@ from config import settings
 log = logging.getLogger(__name__)
 
 _USER_AGENT = (
-    "Mozilla/5.0 (compatible; ResearchBot/1.0; "
-    "+https://github.com/autonomous-research-agent)"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
 )
 
 # Private IP ranges to block (SSRF protection)
@@ -138,7 +139,7 @@ async def _get_robots(base_url: str) -> RobotFileParser:
 async def _is_allowed_by_robots(url: str) -> bool:
     try:
         rp = await _get_robots(url)
-        return rp.can_fetch(_USER_AGENT, url)
+        return rp.can_fetch("*", url)
     except Exception:
         return True  # Fail open
 
@@ -177,7 +178,11 @@ async def fetch_page(url: str) -> FetchResult:
     start = time.monotonic()
     try:
         max_bytes = settings.default_max_response_size_kb * 1024
-        headers = {"User-Agent": _USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
+        headers = {
+            "User-Agent": _USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
 
         async with httpx.AsyncClient(
             timeout=settings.default_request_timeout,

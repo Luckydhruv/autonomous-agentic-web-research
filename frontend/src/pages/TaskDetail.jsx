@@ -142,6 +142,15 @@ function SourcesPanel({ sources }) {
                   </span>
                 </div>
                 <SourceLink url={rec.url} />
+                {(rec.page_summary || rec.relevant_text) && (
+                  <p className="text-slate-300 text-xs leading-relaxed mt-2">{rec.page_summary || rec.relevant_text}</p>
+                )}
+                {rec.main_text && (
+                  <details className="text-xs mt-2">
+                    <summary className="text-slate-500 cursor-pointer hover:text-slate-300">Extracted page text</summary>
+                    <p className="text-slate-400 leading-relaxed mt-2 whitespace-pre-wrap">{rec.main_text}</p>
+                  </details>
+                )}
                 {Object.keys(rec.dynamic_fields ?? {}).length > 0 && (
                   <div className="flex flex-wrap gap-1.5 mt-1">
                     {Object.entries(rec.dynamic_fields).slice(0, 6).map(([k, v]) => (
@@ -175,11 +184,21 @@ function SourcesPanel({ sources }) {
 
 // ── Results / Ranked panel ─────────────────────────────────────────────────
 
-function ResultsPanel({ report }) {
-  if (!report?.ranked_results?.length) {
+function ResultsPanel({ report, sources }) {
+  const fallbackResults = (sources?.records ?? []).map((record, i) => ({
+    rank: i + 1,
+    url: record.url,
+    title: record.title || 'Untitled page',
+    domain: record.domain || new URL(record.url).hostname,
+    final_score: record.relevance_score ?? 0,
+    score_explanation: 'Relevant text extracted from this page; full ranking is not available yet.',
+    score_breakdown: {},
+    dynamic_fields: record.dynamic_fields ?? {},
+  }))
+  const results = report?.ranked_results?.length ? report.ranked_results : fallbackResults
+  if (!results.length) {
     return <p className="text-slate-500 text-sm">No ranked results yet.</p>
   }
-  const results = report.ranked_results
   return (
     <div className="space-y-3">
       {results.map((r) => (
@@ -233,9 +252,31 @@ function ReportPanel({ report }) {
     <div className="space-y-5 text-sm">
       {/* Executive summary */}
       <div>
-        <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Executive Summary</h4>
+        <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Executive Summary (BART)</h4>
         <p className="text-slate-200 leading-relaxed">{r.executive_summary}</p>
       </div>
+
+      {r.top_source_url && (
+        <div className="bg-slate-800/40 rounded-lg p-4 space-y-2">
+          <h4 className="text-slate-400 text-xs uppercase tracking-wider">Most Relevant Source</h4>
+          <p className="text-white font-medium">{r.top_source_title}</p>
+          <SourceLink url={r.top_source_url} />
+          {r.relevant_source_text && (
+            <details className="text-xs">
+              <summary className="text-slate-500 cursor-pointer hover:text-slate-300">Relevant text extracted for BART</summary>
+              <p className="text-slate-300 leading-relaxed mt-2 whitespace-pre-wrap">{r.relevant_source_text}</p>
+            </details>
+          )}
+        </div>
+      )}
+
+      {r.report_narrative && (
+        <div>
+          <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Research Report (350–400 words)</h4>
+          <p className="text-slate-200 leading-relaxed whitespace-pre-wrap">{r.report_narrative}</p>
+          <p className="text-slate-500 text-xs mt-1">{r.report_narrative.trim().split(/\s+/).length} words</p>
+        </div>
+      )}
 
       {/* Key findings */}
       {r.key_findings?.length > 0 && (
@@ -357,6 +398,7 @@ export default function TaskDetail() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [cancelling, setCancelling] = useState(false)
+  const [regenerating, setRegenerating] = useState(false)
   const [activeTab, setActiveTab] = useState('progress')
 
   const fetchAll = useCallback(async () => {
@@ -405,6 +447,19 @@ export default function TaskDetail() {
     }
   }
 
+  const handleRegenerateReport = async () => {
+    setRegenerating(true)
+    try {
+      await api.regenerateReport(taskId)
+      await fetchAll()
+      setActiveTab('report')
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setRegenerating(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center gap-2 text-slate-400 py-20 justify-center">
@@ -424,7 +479,7 @@ export default function TaskDetail() {
     { id: 'progress', label: 'Progress' },
     { id: 'plan',     label: 'Plan' },
     { id: 'sources',  label: `Sources (${sources?.records?.length ?? 0})` },
-    { id: 'results',  label: `Results (${report?.ranked_results?.length ?? 0})` },
+    { id: 'results',  label: `Results (${report?.ranked_results?.length || sources?.records?.length || 0})` },
     { id: 'report',   label: 'Report' },
   ]
 
@@ -450,6 +505,11 @@ export default function TaskDetail() {
           {isActive && (
             <button onClick={handleCancel} disabled={cancelling} className="btn-danger text-xs">
               {cancelling ? 'Cancelling…' : 'Cancel'}
+            </button>
+          )}
+          {!isActive && task?.status === 'completed' && (
+            <button onClick={handleRegenerateReport} disabled={regenerating} className="btn-secondary text-xs">
+              {regenerating ? 'Building BART report…' : 'Rebuild report from top source'}
             </button>
           )}
         </div>
@@ -509,7 +569,7 @@ export default function TaskDetail() {
         {activeTab === 'results' && (
           <div className="card">
             <h3 className="font-semibold text-white mb-4">Ranked Results</h3>
-            <ResultsPanel report={report} />
+          <ResultsPanel report={report} sources={sources} />
           </div>
         )}
         {activeTab === 'report' && (

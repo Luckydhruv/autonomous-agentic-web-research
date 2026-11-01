@@ -32,4 +32,5 @@ export const api = {
   getProgress:(id) => request(`/tasks/${id}/progress`),
   getSources: (id) => request(`/tasks/${id}/sources`),
   getReport:  (id) => request(`/tasks/${id}/report`),
+  regenerateReport: (id) => request(`/tasks/${id}/report/regenerate`, { method: 'POST' }),
 }

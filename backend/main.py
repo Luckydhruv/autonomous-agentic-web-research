@@ -12,8 +12,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import database
-from agent import cancel_research_task, start_research_task
+from agent import cancel_research_task, search_preview_record, start_research_task
 from config import settings
+from ranking import rank_records
+from offline_sources import cached_fallback_records
+from discovery import discover_candidate_urls
+from reporter import generate_report
 from schemas import (
     CreateTaskRequest,
     ProgressResponse,
@@ -199,7 +203,10 @@ async def get_progress(task_id: str) -> ProgressResponse:
             progress_percent=state.progress_percent,
             pages_crawled=state.pages_crawled,
             candidate_urls_count=len(state.candidate_urls),
-            records_count=len(state.records),
+            records_count=(
+                len(rank_records(state.records, state.plan))
+                or int(state.fallback_record is not None)
+            ),
             missing_fields=state.missing_fields,
             stopping_reason=state.stopping_reason,
             recent_urls=state.visited_urls[-5:] if state.visited_urls else [],
@@ -238,12 +245,18 @@ async def get_sources(task_id: str) -> SourcesResponse:
             records=[],
         )
 
+    visible_ranking = rank_records(state.records, state.plan)
+    records_by_url = {record.url: record for record in state.records}
+    visible_records = [records_by_url[result.url] for result in visible_ranking if result.url in records_by_url]
+    if not visible_records and state.fallback_record:
+        visible_records = [state.fallback_record]
+
     return SourcesResponse(
         task_id=task_id,
         visited_urls=state.visited_urls,
         failed_urls=state.failed_urls,
         candidate_urls=state.candidate_urls[:20],
-        records=state.records,
+        records=visible_records,
     )
 
 
@@ -263,12 +276,82 @@ async def get_report(task_id: str) -> ReportResponse:
     ranked: list[RankedResult] = []
     if report:
         ranked = report.ranked_results
+    elif state and state.records:
+        # Surface provisional results while a task is still running or if report
+        # generation did not finish; never show an empty list when pages were retained.
+        ranked = rank_records(state.records, state.plan)
+    elif state and state.fallback_record:
+        ranked = rank_records([state.fallback_record], state.plan)
 
     return ReportResponse(
         task_id=task_id,
         report=report,
         ranked_results=ranked,
     )
+
+
+@app.post("/api/tasks/{task_id}/report/regenerate", response_model=ReportResponse, tags=["results"])
+async def regenerate_report(task_id: str) -> ReportResponse:
+    """Re-rank saved pages and rebuild the report without re-crawling websites."""
+    task = await database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status in (TaskStatus.RUNNING, TaskStatus.PLANNING, TaskStatus.PENDING):
+        raise HTTPException(status_code=409, detail="Wait until crawling finishes before rebuilding the report")
+
+    state = await database.load_state(task_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="No saved crawl data is available")
+    has_cached_records = any(
+        isinstance(record.metadata, dict)
+        and record.metadata.get("retrieval_mode") == "cached_fallback"
+        for record in state.records
+    )
+    has_preview_records = any(
+        isinstance(record.metadata, dict)
+        and record.metadata.get("retrieval_mode") == "search_preview"
+        for record in state.records
+    )
+    if not state.records or has_cached_records:
+        cached_records = cached_fallback_records(state.plan)
+        if cached_records:
+            state.records = cached_records
+            state.fallback_record = cached_records[0]
+            state.stopping_reason = "Live page fetches failed; labeled cached source text used"
+            from evaluator import evaluate_state
+            state = evaluate_state(state)
+
+    if not state.records or has_preview_records:
+        # Recover older empty tasks using a fresh no-key search and retain the
+        # source snippets when their full pages remain inaccessible.
+        refreshed_candidates = await discover_candidate_urls(state.plan)
+        state.candidate_urls.extend(refreshed_candidates)
+        previews = [
+            preview for candidate in refreshed_candidates
+            if (preview := search_preview_record(candidate, state.plan)) is not None
+        ]
+        relevant_previews = [
+            record for record in previews
+            if record.relevance_score >= 0.15
+            and float(record.metadata.get("preview_quality", 0.0)) >= 0.38
+        ]
+        if not relevant_previews and previews:
+            relevant_previews = [max(previews, key=lambda record: record.relevance_score)]
+        if relevant_previews:
+            state.records = relevant_previews[:12]
+            state.fallback_record = max(relevant_previews, key=lambda record: record.relevance_score)
+            state.stopping_reason = "Live article text unavailable; search-result previews used"
+            from evaluator import evaluate_state
+            state = evaluate_state(state)
+
+    if not state.records and state.fallback_record:
+        state.records.append(state.fallback_record)
+
+    ranked = rank_records(state.records, state.plan)
+    report = await generate_report(state, ranked)
+    await database.save_report(task_id, report)
+    await database.save_state(task_id, state)
+    return ReportResponse(task_id=task_id, report=report, ranked_results=ranked)
 
 
 # ──────────────────────────────────────────────
