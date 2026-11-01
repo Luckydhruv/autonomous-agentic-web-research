@@ -28,7 +28,8 @@ async def test_config_endpoint():
         resp = await client.get("/api/config")
     assert resp.status_code == 200
     data = resp.json()
-    assert "search_provider" in data
+    assert data["crawler"] == "Crawl4AI local Docker API"
+    assert "crawl4ai_configured" in data
     assert "default_max_pages" in data
 
 

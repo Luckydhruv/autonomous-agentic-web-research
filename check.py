@@ -2,7 +2,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'backend'))
 
 # Verify all modules import cleanly
-import config, schemas, database, llm_client, planner, discovery, crawler
+import config, schemas, database, llm_client, planner, discovery, crawler, crawl4ai_client
 import extractor, evaluator, ranking, reporter, agent, main
 
 # Quick smoke tests
@@ -11,11 +11,6 @@ plan = plan_deterministic("Find the best gaming laptops under 80000", 20)
 assert plan.topic, "topic empty"
 assert len(plan.required_fields) > 0, "no fields"
 assert plan.max_pages == 20, "wrong max_pages"
-
-from crawler import _is_safe_url
-assert not _is_safe_url("http://localhost/x")[0], "localhost should be blocked"
-assert not _is_safe_url("http://127.0.0.1/x")[0], "loopback should be blocked"
-assert _is_safe_url("https://example.com/page")[0], "example.com should be allowed"
 
 from evaluator import compute_relevance, source_reliability_score, should_stop
 from schemas import CrawlState, ResearchPlan, TaskStatus, CandidateURL

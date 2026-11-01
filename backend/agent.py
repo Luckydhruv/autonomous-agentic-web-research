@@ -19,7 +19,6 @@ from config import settings
 from crawler import fetch_page
 from discovery import (
     discover_candidate_urls,
-    extract_link_candidates_from_html,
     normalize_url,
     score_link_relevance,
     search_result_matches_topic,
@@ -235,34 +234,33 @@ async def _crawl_step(state: CrawlState, depth_limit: int) -> CrawlState:
         # body. Retain its matching search preview as a last-resort source row.
         _keep_preview(state, candidate)
 
-    # Link discovery: add promising child links to the queue (depth limit)
+    # Use internal links extracted by Crawl4AI to expand the frontier up to
+    # the requested depth. No local HTML link parser or direct HTTP fetches.
     if candidate.depth < depth_limit:
-        child_links = extract_link_candidates_from_html(result.html, result.final_url)
-        visited_set = {normalize_url(v) for v in state.visited_urls}
-        queued_set = {normalize_url(c.url) for c in state.candidate_urls}
-
-        new_candidates_added = 0
-        for link, anchor_text in child_links:
-            norm_link = normalize_url(link)
-            if norm_link in visited_set or norm_link in queued_set:
+        visited = {normalize_url(value) for value in state.visited_urls}
+        queued = {normalize_url(item.url) for item in state.candidate_urls}
+        added = 0
+        for link, anchor in result.links or []:
+            normalized = normalize_url(link)
+            if normalized in visited or normalized in queued:
                 continue
-            if not search_result_matches_topic(norm_link, anchor_text, "", state.plan):
+            if not search_result_matches_topic(link, anchor, "", state.plan):
                 continue
-            link_score = score_link_relevance(link, anchor_text, state.plan)
-            if link_score >= 0.2:
-                state.candidate_urls.append(
-                    CandidateURL(
-                        url=link,
-                        priority=round(link_score * 0.8, 3),  # child pages get slightly lower priority
-                        depth=candidate.depth + 1,
-                        source="link",
-                        reason=f"Link from {url[:60]}",
-                    )
-                )
-                queued_set.add(norm_link)
-                new_candidates_added += 1
-                if new_candidates_added >= 8:  # max 8 new links per page
-                    break
+            priority = score_link_relevance(link, anchor, state.plan)
+            if priority < 0.25:
+                continue
+            state.candidate_urls.append(CandidateURL(
+                url=link,
+                priority=round(priority * 0.8, 3),
+                depth=candidate.depth + 1,
+                source="crawl4ai_link",
+                reason=f"Relevant internal link discovered by Crawl4AI on {url[:80]}",
+                title=anchor or None,
+            ))
+            queued.add(normalized)
+            added += 1
+            if added >= 8:
+                break
 
     return state
 

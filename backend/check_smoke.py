@@ -8,11 +8,6 @@ assert plan.topic
 assert len(plan.required_fields) > 0
 assert plan.max_pages == 20
 
-from crawler import _is_safe_url
-assert not _is_safe_url("http://localhost/x")[0]
-assert not _is_safe_url("http://127.0.0.1/x")[0]
-assert _is_safe_url("https://example.com/page")[0]
-
 from evaluator import should_stop
 from schemas import CrawlState, ResearchPlan, TaskStatus
 plan2 = ResearchPlan(topic="gaming laptop", required_fields=["name","price"],

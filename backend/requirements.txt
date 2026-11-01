@@ -8,11 +8,7 @@ aiosqlite
 httpx
 beautifulsoup4
 python-dotenv
-tldextract
 pytest
 pytest-asyncio
-duckduckgo-search
-primp
-lxml
 transformers
 torch

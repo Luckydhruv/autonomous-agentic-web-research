@@ -1,16 +1,16 @@
-# Autonomous Agentic Web Research & Crawling System
+# Autonomous Web Research with Crawl4AI
 
-An AI-powered system that converts a natural-language research goal into an adaptive web-crawling strategy, extracts structured evidence, ranks results, and generates a research report.
+An AI-powered research app that turns a natural-language objective into search queries, uses the local Crawl4AI API to read search results and crawl selected pages, extracts evidence, ranks sources, and generates a report.
 
 ---
 
 ## Features
 
-- **Adaptive crawl loop** — reprioritises the URL queue in real time based on which required fields are still missing
+- **Crawl4AI API crawling** — search-results pages and source pages are fetched through a self-hosted Crawl4AI Docker API
+- **Adaptive crawl loop** — prioritises URLs based on relevance and still-missing fields
 - **LLM-assisted planning** — converts a plain-English objective into a structured research plan (topic, fields, search queries, stopping criteria)
 - **Deterministic fallback** — planner, extractor, and reporter all work without any LLM
-- **SSRF protection** — blocks private IPs, loopback, cloud metadata endpoints, non-HTTP schemes, and unsafe redirects
-- **robots.txt compliance** and per-domain rate limiting
+- **Robots-aware Crawl4AI crawling** — the local service handles browser rendering, page cleanup, and robots checks
 - **Weighted ranking** — scores each result on relevance, source reliability, freshness, completeness, and constraint match
 - **Structured report** — executive summary, key findings, comparison table, crawl statistics, and confidence score
 - **Relevant source summary with BART** — filters boilerplate, ranks topic-matched passages, summarizes the best source locally in token-safe chunks, and shows both the extracted text and BART summary in the report
@@ -25,10 +25,11 @@ An AI-powered system that converts a natural-language research goal into an adap
 |-------|-----------|
 | Frontend | React 19, Vite, Tailwind CSS, React Router |
 | Backend | Python 3.11+, FastAPI, SQLAlchemy (async), aiosqlite |
-| HTTP | httpx (async) |
-| Parsing | BeautifulSoup4 |
+| Crawling | Self-hosted Crawl4AI Docker API (`/crawl`) |
+| HTTP | httpx (async), used to call the local Crawl4AI API |
+| Parsing | BeautifulSoup4 for Markdown returned by Crawl4AI |
 | LLM | Ollama (local) · OpenAI-compatible cloud (optional) · BART page summarizer (local) |
-| Search | DuckDuckGo HTML scraping (default) · Serper API (optional) |
+| Search discovery | Search-result pages are fetched through Crawl4AI; no search-provider SDK |
 | Database | SQLite (default) · PostgreSQL (via `DATABASE_URL`) |
 
 ---
@@ -40,8 +41,9 @@ frontend (React + Vite)
     │  HTTP proxy → :8000
 backend (FastAPI)
     ├── planner.py    NL objective → ResearchPlan
-    ├── discovery.py  Search queries → candidate URLs
-    ├── crawler.py    Safe HTTP fetcher
+    ├── crawl4ai_client.py  Authenticated local API calls
+    ├── discovery.py  Crawl search pages → candidate URLs
+    ├── crawler.py    Crawl4AI source-page adapter
     ├── extractor.py  HTML → ExtractedRecord
     ├── evaluator.py  Relevance · coverage · duplicates · stop criteria
     ├── ranking.py    Weighted scoring
@@ -57,23 +59,27 @@ backend (FastAPI)
 
 - Python 3.11 or later
 - Node.js 18 or later
+- Docker Desktop or Docker Engine for the Crawl4AI service
 - *(Optional)* [Ollama](https://ollama.com) for local LLM
-- Python package dependencies for the local BART model (`transformers` and `torch`); the model weights download and cache on first use
+- Python package dependencies for local BART (`transformers` and `torch`)
 
 ---
 
-## Installation (Windows)
+## Installation
 
 ```bat
 :: 1. Copy environment file
 copy .env.example .env
 
-:: 2. Install backend dependencies
+:: 2. Start local Crawl4AI (creates a persistent token in .env)
+start_crawl4ai.bat
+
+:: 3. Install backend dependencies
 cd backend
 pip install -r requirements.txt
 cd ..
 
-:: 3. Install frontend dependencies
+:: 4. Install frontend dependencies
 cd frontend
 npm install
 cd ..
@@ -83,7 +89,9 @@ cd ..
 
 ## Running the App
 
-Open **two separate terminals**.
+Start Docker and run `start_crawl4ai.bat` first. It launches Crawl4AI 0.9.2 on port 11235, creates a persistent local API token in `.env`, and reuses the named container on later starts. On Linux/macOS, use `./start_crawl4ai.sh`.
+
+Then open **two separate terminals** for the app.
 
 **Terminal 1 – backend** (port 8000):
 ```bat
@@ -132,12 +140,6 @@ CLOUD_LLM_MODEL=gpt-4o-mini
 
 The backend removes common page chrome, extracts topic-matched passages, ranks the pages, and summarizes the top-ranked source with the fine-tuned BART checkpoint placed in the repository root. With `BART_MODEL=auto` (the default), it loads the local `config.json`, `model.safetensors`, and tokenizer files, so no API key or expiring access token is needed. Long relevant passages are split into 900-token chunks and consolidated when needed. The report displays the selected source, relevant extracted text, and BART summary. If the checkpoint is absent in a clean clone, the app falls back to `facebook/bart-large-cnn` and caches it on first use. Configure `BART_ENABLED`, `BART_MODEL`, `BART_INPUT_TOKENS`, and `BART_SUMMARY_TOKENS` in `.env`; an explicit model ID or local path in `BART_MODEL` overrides automatic selection. If model loading fails, the app keeps running and uses an extractive fallback.
 
-### Serper search API (more reliable than DuckDuckGo scraping)
-
-```
-SEARCH_PROVIDER=serper
-SERPER_API_KEY=your_key_here
-```
 
 ---
 
@@ -147,7 +149,8 @@ SERPER_API_KEY=your_key_here
 |----------|---------|-------|
 | `OLLAMA_ENABLED` | `true` | Set `false` to skip Ollama |
 | `OLLAMA_MODEL` | `llama3.2` | Any model pulled in Ollama |
-| `SEARCH_PROVIDER` | `duckduckgo_html` | `duckduckgo_html` · `serper` · `none` |
+| `CRAWL4AI_API_BASE` | `http://localhost:11235` | Local Crawl4AI Docker API address |
+| `CRAWL4AI_API_TOKEN` | generated by `start_crawl4ai` | Persistent local bearer token; keep it in `.env` |
 | `DATABASE_URL` | `sqlite:///./research.db` | Use a PostgreSQL URL for production |
 | `DEFAULT_MAX_PAGES` | `20` | Crawl budget per task |
 | `DEFAULT_CRAWL_DEPTH` | `2` | Max link-following depth |
@@ -155,9 +158,8 @@ SERPER_API_KEY=your_key_here
 | `BART_MODEL` | `auto` | Prefer the fine-tuned repo-root checkpoint; set a Hugging Face model ID or local path to override |
 | `BART_INPUT_TOKENS` | `900` | Per-chunk input budget, safely below BART's input limit |
 | `BART_SUMMARY_TOKENS` | `100` | Maximum tokens for each page chunk summary |
-| `EXTRA_BLOCKED_DOMAINS` | *(empty)* | Comma-separated extra SSRF blocklist |
 
-> **Security:** Never commit `.env` or any file containing API keys. `.env` is listed in `.gitignore`.
+> **Security:** Never commit `.env` or any file containing API keys or local API tokens. `.env` is listed in `.gitignore`.
 
 ---
 
@@ -205,7 +207,8 @@ python check.py
 AI/
 ├── backend/
 │   ├── main.py · agent.py · planner.py · discovery.py
-│   ├── crawler.py · extractor.py · evaluator.py
+│   ├── crawl4ai_client.py · crawler.py · extractor.py
+│   ├── evaluator.py
 │   ├── ranking.py · reporter.py · database.py
 │   ├── llm_client.py · config.py · schemas.py
 │   ├── requirements.txt
@@ -216,6 +219,7 @@ AI/
 │       ├── pages/      Dashboard.jsx · TaskDetail.jsx
 │       └── components/ ResearchForm · StatusBadge · ProgressBar · Icons
 ├── .env.example
+├── start_crawl4ai.bat · start_crawl4ai.sh
 ├── start_backend.bat
 ├── start_frontend.bat
 ├── run_tests.bat
@@ -224,9 +228,12 @@ AI/
 
 ---
 
+## Crawl4AI integration
+
+The app calls the self-hosted Crawl4AI server at `http://localhost:11235` using a bearer token. Crawl4AI local provides page crawling, not a dedicated web-search endpoint, so the app asks Crawl4AI to fetch public search-result pages and then queues relevant result links. Source-page fetches and link extraction also go through Crawl4AI. The service needs Docker and a local token; it does not need a Crawl4AI Cloud account or expiring cloud API key.
+
 ## Known Limitations
 
-- JavaScript-heavy single-page apps are not rendered. Playwright support exists (`PLAYWRIGHT_ENABLED=true`) but is not installed by default.
-- The DuckDuckGo HTML search provider may return fewer results or be rate-limited under heavy use.
+- New research tasks require the local Crawl4AI service to be running with a matching token.
+- Search pages can still be rate-limited or change their result markup; Crawl4AI fetches and renders them while the app filters links for topic relevance.
 - Results reflect publicly available web content at crawl time; prices and availability may change.
-- DNS rebinding is a theoretical SSRF edge case not fully mitigated at the HTTP transport layer.

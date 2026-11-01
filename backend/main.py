@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import database
 from agent import cancel_research_task, search_preview_record, start_research_task
 from config import settings
+from crawl4ai_client import Crawl4AIError, check_service
 from ranking import rank_records
 from offline_sources import cached_fallback_records
 from discovery import discover_candidate_urls
@@ -76,10 +77,11 @@ async def get_config() -> dict:
     return {
         "ollama_enabled": settings.ollama_enabled,
         "ollama_model": settings.ollama_model,
-        "search_provider": settings.search_provider,
+        "crawler": "Crawl4AI local Docker API",
+        "crawl4ai_configured": bool(settings.crawl4ai_api_token.strip()),
+        "crawl4ai_api_base": settings.crawl4ai_api_base,
         "default_max_pages": settings.default_max_pages,
         "default_crawl_depth": settings.default_crawl_depth,
-        "playwright_enabled": settings.playwright_enabled,
         "cloud_llm_enabled": settings.cloud_llm_enabled,
     }
 
@@ -91,6 +93,15 @@ async def get_config() -> dict:
 @app.post("/api/tasks", response_model=TaskResponse, status_code=201, tags=["tasks"])
 async def create_task(request: CreateTaskRequest) -> TaskResponse:
     """Create a new research task and start the autonomous agent."""
+    if not settings.crawl4ai_api_token.strip():
+        raise HTTPException(
+            status_code=503,
+            detail="Crawl4AI API token is not configured. Start the local Crawl4AI service and set CRAWL4AI_API_TOKEN in .env.",
+        )
+    try:
+        await check_service()
+    except Crawl4AIError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     task_id = str(uuid.uuid4())
     task = await database.create_task(
         task_id=task_id,

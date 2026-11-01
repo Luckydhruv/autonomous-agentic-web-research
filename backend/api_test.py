@@ -34,7 +34,7 @@ print(f"[PASS] GET /health              → {health['status']!r}")
 
 # 2. Config
 cfg = get("/api/config")
-print(f"[PASS] GET /api/config          → provider={cfg['search_provider']!r}, ollama={cfg['ollama_enabled']}")
+print(f"[PASS] GET /api/config          → crawler={cfg['crawler']!r}, configured={cfg['crawl4ai_configured']}")
 
 # 3. Create task
 task = post("/api/tasks", {
