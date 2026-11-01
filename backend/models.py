@@ -1,13 +1,16 @@
-"""
-schemas.py – Pydantic models for API requests, responses, and internal data structures.
-"""
+"""Shared settings and data models for the API, crawler, and reports."""
 from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+import os
+from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+os.environ.setdefault("CRAWL4_AI_BASE_DIRECTORY", str(Path(__file__).resolve().parent.parent))
 
 
 def _as_dict(value: Any) -> dict:
@@ -134,6 +137,12 @@ class RankedResult(BaseModel):
         return _as_dict(value)
 
 
+class ReportChunk(BaseModel):
+    title: str
+    text: str
+    source_url: str = ""
+
+
 # ──────────────────────────────────────────────
 # Research Report
 # ──────────────────────────────────────────────
@@ -143,6 +152,7 @@ class ResearchReport(BaseModel):
     objective: str
     executive_summary: str
     report_narrative: str = ""
+    report_chunks: list[ReportChunk] = Field(default_factory=list)
     top_source_title: str = ""
     top_source_url: str = ""
     relevant_source_text: str = ""
@@ -215,3 +225,24 @@ class ReportResponse(BaseModel):
     task_id: str
     report: Optional[ResearchReport]
     ranked_results: list[RankedResult]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=str(Path(__file__).resolve().parent.parent / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    database_url: str = "sqlite+aiosqlite:///./research.db"
+    frontend_url: str = "http://localhost:5173"
+    app_port: int = 8000
+    default_max_pages: int = 20
+    default_crawl_depth: int = 2
+    bart_enabled: bool = True
+    bart_model: str = "auto"
+    bart_input_tokens: int = 900
+    bart_summary_tokens: int = 120
+
+
+settings = Settings()

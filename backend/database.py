@@ -1,24 +1,15 @@
-"""
-database.py – SQLAlchemy async database setup and CRUD helpers.
-Uses SQLite by default; switch to PostgreSQL via DATABASE_URL env var.
-"""
+"""Async SQLite storage for tasks, crawl state, and reports."""
 from __future__ import annotations
 
-import json
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
-from sqlalchemy import (
-    Column, DateTime, Float, Integer, String, Text, event, text
-)
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import Column, DateTime, Float, Integer, String, Text, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-from config import settings
-from schemas import (
-    CandidateURL, CrawlState, ExtractedRecord, ResearchPlan,
-    ResearchReport, TaskStatus
-)
+from models import settings
+from models import CrawlState, ResearchPlan, ResearchReport, TaskStatus
 
 
 # ──────────────────────────────────────────────
@@ -31,7 +22,7 @@ if _db_url.startswith("sqlite:///") and "aiosqlite" not in _db_url:
     _db_url = _db_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
 
 engine = create_async_engine(_db_url, echo=False)
-AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+Session = async_sessionmaker(engine, expire_on_commit=False)
 
 
 # ──────────────────────────────────────────────
@@ -70,11 +61,6 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def get_session() -> AsyncSession:
-    async with AsyncSessionLocal() as session:
-        yield session
-
-
 # ──────────────────────────────────────────────
 # CRUD
 # ──────────────────────────────────────────────
@@ -85,7 +71,7 @@ async def create_task(
     max_pages: int,
     crawl_depth: int,
 ) -> TaskORM:
-    async with AsyncSessionLocal() as session:
+    async with Session() as session:
         task = TaskORM(
             id=task_id,
             objective=objective,
@@ -100,13 +86,12 @@ async def create_task(
 
 
 async def get_task(task_id: str) -> Optional[TaskORM]:
-    async with AsyncSessionLocal() as session:
+    async with Session() as session:
         return await session.get(TaskORM, task_id)
 
 
 async def get_all_tasks() -> list[TaskORM]:
-    from sqlalchemy import select
-    async with AsyncSessionLocal() as session:
+    async with Session() as session:
         result = await session.execute(
             select(TaskORM).order_by(TaskORM.created_at.desc())
         )
@@ -120,7 +105,7 @@ async def update_task_status(
     pages_crawled: int = 0,
     stopping_reason: Optional[str] = None,
 ) -> None:
-    async with AsyncSessionLocal() as session:
+    async with Session() as session:
         task = await session.get(TaskORM, task_id)
         if task:
             task.status = status
@@ -132,7 +117,7 @@ async def update_task_status(
 
 
 async def save_plan(task_id: str, plan: ResearchPlan) -> None:
-    async with AsyncSessionLocal() as session:
+    async with Session() as session:
         task = await session.get(TaskORM, task_id)
         if task:
             task.plan_json = plan.model_dump_json()
@@ -141,7 +126,7 @@ async def save_plan(task_id: str, plan: ResearchPlan) -> None:
 
 
 async def save_state(task_id: str, state: CrawlState) -> None:
-    async with AsyncSessionLocal() as session:
+    async with Session() as session:
         task = await session.get(TaskORM, task_id)
         if task:
             task.state_json = state.model_dump_json()
@@ -154,7 +139,7 @@ async def save_state(task_id: str, state: CrawlState) -> None:
 
 
 async def save_report(task_id: str, report: ResearchReport) -> None:
-    async with AsyncSessionLocal() as session:
+    async with Session() as session:
         task = await session.get(TaskORM, task_id)
         if task:
             task.report_json = report.model_dump_json()

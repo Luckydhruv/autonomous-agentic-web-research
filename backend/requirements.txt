@@ -3,13 +3,7 @@ uvicorn[standard]
 pydantic
 pydantic-settings
 sqlalchemy[asyncio]
-greenlet
 aiosqlite
-httpx
 crawl4ai==0.9.5
-beautifulsoup4
-python-dotenv
-pytest
-pytest-asyncio
 transformers
 torch

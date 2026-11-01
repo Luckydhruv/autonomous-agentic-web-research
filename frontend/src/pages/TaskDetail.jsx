@@ -248,6 +248,8 @@ function ReportPanel({ report }) {
     return <p className="text-slate-500 text-sm">Report not yet generated.</p>
   }
   const r = report.report
+  const reportChunks = Array.isArray(r.report_chunks) ? r.report_chunks : []
+  const reportText = reportChunks.map(chunk => `${chunk.title} ${chunk.text}`).join(' ')
   return (
     <div className="space-y-5 text-sm">
       {/* Executive summary */}
@@ -270,7 +272,21 @@ function ReportPanel({ report }) {
         </div>
       )}
 
-      {r.report_narrative && (
+      {reportChunks.length > 0 ? (
+        <section>
+          <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Evidence-Based Research Report</h4>
+          <div className="space-y-3">
+            {reportChunks.map((chunk, index) => (
+              <article key={`${chunk.title}-${index}`} className="rounded-lg border border-slate-800 bg-slate-800/30 p-4">
+                <h5 className="text-white font-medium mb-2">{chunk.title}</h5>
+                <p className="text-slate-200 leading-relaxed whitespace-pre-wrap">{chunk.text}</p>
+                {chunk.source_url && <div className="mt-3"><SourceLink url={chunk.source_url} /></div>}
+              </article>
+            ))}
+          </div>
+          <p className="text-slate-500 text-xs mt-2">{reportText.trim().split(/\s+/).filter(Boolean).length} words across {reportChunks.length} sections</p>
+        </section>
+      ) : r.report_narrative && (
         <div>
           <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Evidence-Based Research Report</h4>
           <p className="text-slate-200 leading-relaxed whitespace-pre-wrap">{r.report_narrative}</p>
