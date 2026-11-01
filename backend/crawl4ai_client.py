@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse, urlunparse
 
 import httpx
 
@@ -66,18 +66,50 @@ async def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
     markdown = _markdown_text(result.get("markdown"))
     parsed: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for title, url in re.findall(r"\[([^\]]{3,240})\]\((https?://[^)\s]+)\)", markdown):
-        if "duckduckgo.com" in url or url in seen:
-            continue
-        seen.add(url)
+
+    def add_candidate(url: str, title: str, snippet: str = "") -> None:
+        target = _unwrap_search_url(url)
+        if not target or _is_search_page(target) or target in seen:
+            return
+        title = title.strip()
+        snippet = snippet.strip() or _nearby_markdown_text(markdown, title)
+        seen.add(target)
         parsed.append({
-            "url": url,
-            "title": title.strip(),
-            "snippet": _nearby_markdown_text(markdown, title),
+            "url": target,
+            "title": title[:300],
+            "snippet": snippet.strip()[:1000],
             "provider": "crawl4ai_crawled_search_page",
         })
-        if len(parsed) >= limit:
-            break
+
+    # Crawl4AI preserves DDG result anchors in `links.internal`, because the
+    # redirect URLs share DuckDuckGo's hostname. Parsing only Markdown and
+    # dropping all DDG-hosted links previously discarded every real result.
+    link_groups = result.get("links") or {}
+    if isinstance(link_groups, dict):
+        for group in ("internal", "external"):
+            links = link_groups.get(group, [])
+            if not isinstance(links, list):
+                continue
+            for link in links:
+                if not isinstance(link, dict):
+                    continue
+                add_candidate(
+                    str(link.get("href") or link.get("url") or ""),
+                    str(link.get("text") or link.get("title") or ""),
+                    str(link.get("snippet") or ""),
+                )
+                if len(parsed) >= limit:
+                    break
+            if len(parsed) >= limit:
+                break
+
+    # The Markdown path is retained for search engines whose result anchors
+    # aren't included in Crawl4AI's structured links metadata.
+    if len(parsed) < limit:
+        for title, url in re.findall(r"\[([^\]]{3,240})\]\((https?://[^)\s]+)\)", markdown):
+            add_candidate(url, title, _nearby_markdown_text(markdown, title))
+            if len(parsed) >= limit:
+                break
     return parsed
 
 
@@ -156,3 +188,26 @@ def _nearby_markdown_text(markdown: str, title: str) -> str:
         if title.casefold() in line.casefold():
             return " ".join(part.strip() for part in lines[index:index + 3] if part.strip())[:1000]
     return ""
+
+
+def _unwrap_search_url(url: str) -> str:
+    """Unwrap DuckDuckGo result redirect URLs into their actual target URL."""
+    parsed = urlparse(url)
+    host = parsed.netloc.casefold().split(":", 1)[0]
+    if host == "duckduckgo.com" or host.endswith(".duckduckgo.com"):
+        target = parse_qs(parsed.query).get("uddg", [""])[0]
+        if target:
+            url = unquote(target)
+            parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, ""))
+
+
+def _is_search_page(url: str) -> bool:
+    host = urlparse(url).netloc.casefold().split(":", 1)[0].removeprefix("www.")
+    return (
+        host == "duckduckgo.com" or host.endswith(".duckduckgo.com")
+        or host == "google.com" or host.endswith(".google.com")
+        or host == "bing.com" or host.endswith(".bing.com")
+    )

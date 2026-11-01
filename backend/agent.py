@@ -104,7 +104,10 @@ def search_preview_record(candidate: CandidateURL, plan: ResearchPlan) -> Extrac
     snippet = (candidate.snippet or "").strip()
     if not title or not snippet or len(snippet.split()) < 8:
         return None
-    if not search_result_matches_topic(candidate.url, title, snippet, plan):
+    if (
+        candidate.source != "crawl4ai_search_fallback"
+        and not search_result_matches_topic(candidate.url, title, snippet, plan)
+    ):
         return None
     lower_snippet = snippet.casefold()
     generic_copy = any(
@@ -302,7 +305,10 @@ async def run_research_agent(task_id: str, objective: str, max_pages: int, crawl
         if not initial_candidates:
             log.warning("No initial URLs discovered. Using search queries as fallback seeds.")
             # If no search results, we can't proceed meaningfully
-            state.stopping_reason = "No URLs discovered – check search provider configuration"
+            state.stopping_reason = (
+                "Crawl4AI crawled the search pages but found no usable source links. "
+                "Check the local Crawl4AI service and try a broader research objective."
+            )
             state.status = TaskStatus.COMPLETED
 
         # Phase 3: Adaptive Crawl Loop

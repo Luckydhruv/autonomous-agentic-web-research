@@ -62,6 +62,7 @@ async def search_urls(query: str, max_results: int = 12) -> list[str]:
 async def discover_candidate_urls(plan: ResearchPlan) -> list[CandidateURL]:
     """Search focused queries with Crawl4AI and return deduplicated candidates."""
     candidates: list[CandidateURL] = []
+    fallback_rows: list[tuple[float, dict]] = []
     seen: set[str] = set()
     queries = plan.search_queries[: min(4, len(plan.search_queries))]
     for index, query in enumerate(queries):
@@ -75,9 +76,24 @@ async def discover_candidate_urls(plan: ResearchPlan) -> list[CandidateURL]:
         priority = 1.0 - (index / max(len(queries), 1)) * 0.25
         for row in rows:
             url = normalize_url(row["url"])
-            if url in seen or not is_valid_http_url(url):
+            if not is_valid_http_url(url):
                 continue
-            if not search_result_matches_topic(url, row.get("title"), row.get("snippet"), plan):
+            title = row.get("title") or ""
+            snippet = row.get("snippet") or ""
+            topic_terms = [
+                token for token in re.findall(r"[a-z0-9]+", plan.topic.casefold())
+                if len(token) >= 3 and token not in {"the", "and", "for", "with", "from", "about", "statistics", "statistic", "report"}
+            ]
+            evidence_text = f"{url} {title} {snippet}".casefold()
+            overlap = sum(
+                any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", evidence_text)
+                    for alias in {token, *({"iiitdm", "iiitdmj", "iiit"} if token in {"iiit", "iiitdm", "iiitdmj"} else set())})
+                for token in topic_terms
+            ) / max(len(topic_terms), 1)
+            fallback_rows.append((overlap + priority * 0.01, row))
+            if url in seen:
+                continue
+            if not search_result_matches_topic(url, title, snippet, plan):
                 continue
             seen.add(url)
             candidates.append(CandidateURL(
@@ -89,6 +105,24 @@ async def discover_candidate_urls(plan: ResearchPlan) -> list[CandidateURL]:
                 title=row.get("title") or None,
                 snippet=row.get("snippet") or None,
             ))
+
+    # Search engines sometimes return relevant sources whose title is too
+    # abbreviated for the strict topic filter. Keep the best actual result as
+    # a crawl seed rather than ending the research run with an empty queue.
+    if not candidates and fallback_rows:
+        _, row = max(fallback_rows, key=lambda item: item[0])
+        url = normalize_url(row["url"])
+        if is_valid_http_url(url):
+            candidates.append(CandidateURL(
+                url=url,
+                priority=0.35,
+                depth=0,
+                source="crawl4ai_search_fallback",
+                reason="Best available result from a Crawl4AI-crawled search page",
+                title=row.get("title") or None,
+                snippet=row.get("snippet") or None,
+            ))
+            log.warning("Strict topic matching returned no candidates; crawling the closest search result: %s", url)
     log.info("Crawl4AI discovered %d relevant URLs", len(candidates))
     return candidates
 
