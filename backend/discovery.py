@@ -369,6 +369,47 @@ def extract_links_from_html(html: str, base_url: str) -> list[str]:
 # Candidate URL builder
 # ──────────────────────────────────────────────
 
+def search_result_matches_topic(
+    url: str, title: str | None, snippet: str | None, plan: ResearchPlan,
+) -> bool:
+    """Reject clearly unrelated SERP results before they enter the crawl queue."""
+    text = urllib.parse.unquote(
+        f"{url} {title or ''} {snippet or ''}"
+    ).casefold()
+    topic_terms = [
+        token for token in re.findall(r"[a-z0-9]+", plan.topic.casefold())
+        if len(token) >= 3 and token not in {
+            "the", "and", "for", "with", "from", "about", "statistics",
+            "statistic", "data", "report", "latest", "research", "search",
+        }
+    ]
+    if not topic_terms:
+        return True
+
+    aliases = {
+        "iiit": ("iiit", "iiitdm", "iiitdmj"),
+        "iiitdm": ("iiitdm", "iiitdmj"),
+    }
+    hits = {
+        term for term in topic_terms
+        if any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", text)
+               for alias in aliases.get(term, (term,)))
+    }
+    if re.search(r"\bplacements?\b", plan.topic, re.IGNORECASE):
+        institution_terms = [term for term in topic_terms if term not in {
+            "placement", "placements",
+        }]
+        institution_hit = any(term in hits for term in institution_terms)
+        official_host = urllib.parse.urlparse(url).netloc.casefold().endswith("iiitdmj.ac.in")
+        placement_hit = bool(re.search(
+            r"\b(placements?|package|salary|salaries|ctc|recruiters?|"
+            r"placement report|annual report)\b", text, re.IGNORECASE,
+        )) or official_host
+        return institution_hit and placement_hit
+
+    return bool(hits) and len(hits) / len(topic_terms) >= 0.2
+
+
 async def discover_candidate_urls(plan: ResearchPlan) -> list[CandidateURL]:
     """
     Run all search queries and return a prioritised list of CandidateURLs.
@@ -388,6 +429,9 @@ async def discover_candidate_urls(plan: ResearchPlan) -> list[CandidateURL]:
             if norm not in seen:
                 seen.add(norm)
                 preview_title, preview_snippet = _SEARCH_PREVIEWS.get(norm, (None, None))
+                if not search_result_matches_topic(norm, preview_title, preview_snippet, plan):
+                    log.info("Dropped off-topic search result: %s", norm)
+                    continue
                 candidates.append(
                     CandidateURL(
                         url=norm,

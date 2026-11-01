@@ -200,6 +200,63 @@ def _fallback_extract(text: str, plan: ResearchPlan) -> dict[str, Any]:
 
     requested = set(plan.required_fields) | set(plan.extraction_schema)
 
+    if re.search(r"\bplacements?\b", plan.topic, re.IGNORECASE):
+        package_pattern = re.compile(
+            r"\b(?P<kind>highest|average|avg\.?|median|lowest)\s+"
+            r"(?:annual\s+)?(?:package|salary|ctc)\b[^.\n]{0,35}?"
+            r"(?P<value>(?:₹|INR\b|Rs\.?\s*)\s*[\d,.]+(?:\s*(?:LPA|lakhs?|crores?|cr\.?))?"
+            r"|[\d,.]+\s*(?:LPA|lakhs?|crores?|cr\.?))",
+            re.IGNORECASE,
+        )
+        field_for_kind = {
+            "highest": "highest_package",
+            "average": "average_package",
+            "avg": "average_package",
+            "avg.": "average_package",
+            "median": "median_package",
+            "lowest": "lowest_package",
+        }
+        for match in package_pattern.finditer(text):
+            field = field_for_kind[match.group("kind").lower()]
+            if field in requested:
+                result[field] = re.sub(r"\s+", " ", match.group("value")).strip()
+
+        year = re.search(r"\b(20\d{2}\s*[-/]\s*(?:20)?\d{2})\b", text)
+        if year and "academic_year" in requested:
+            result["academic_year"] = re.sub(r"\s+", "", year.group(1))
+
+        if "placement_rate" in requested:
+            for line in text.splitlines():
+                if re.search(r"\bplacement\b|\bplaced\b", line, re.IGNORECASE):
+                    rate = re.search(r"\b(\d{1,3}(?:\.\d+)?)\s*%", line)
+                    if rate:
+                        result["placement_rate"] = f"{rate.group(1)}%"
+                        break
+
+        count_patterns = {
+            "students_eligible": (
+                r"(?:students?\s+eligible|eligible\s+students?)\s*[:=-]\s*([\d,]+)|"
+                r"([\d,]+)\s+(?:eligible\s+)?students?\s+were\s+eligible"
+            ),
+            "students_placed": (
+                r"students?\s+placed\s*[:=-]\s*([\d,]+)|"
+                r"([\d,]+)\s+students?\s+(?:were\s+)?placed"
+            ),
+            "offers_made": (
+                r"(?:offers?\s+made|offers?)\s*[:=-]\s*([\d,]+)|"
+                r"([\d,]+)\s+(?:placement\s+)?offers?\b"
+            ),
+            "recruiters": (
+                r"(?:number\s+of\s+)?(?:recruiters?|companies\s+visited)\s*[:=-]\s*([\d,]+)|"
+                r"([\d,]+)\s+(?:recruiters?|companies)\b"
+            ),
+        }
+        for field, pattern in count_patterns.items():
+            if field in requested and field not in result:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    result[field] = next(group for group in match.groups() if group)
+
     # Only scan fields that the plan requested; incidental prices in page chrome
     # must not turn into fake findings for a news or research task.
     price_m = re.search(r"[\$₹€£]\s*[\d,]+(?:\.\d{2})?", text) if "price" in requested else None

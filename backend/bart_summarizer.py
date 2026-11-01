@@ -53,6 +53,8 @@ def _fallback_summary(text: str, max_chars: int = 1800) -> str:
     """Return a compact sentence-based summary if model weights are unavailable."""
     sentences = re.split(r"(?<=[.!?])\s+", text)
     selected = [s.strip() for s in sentences if len(s.strip()) > 35][:8]
+    if not selected and text.strip():
+        selected = [text.strip()]
     return " ".join(selected)[:max_chars]
 
 
@@ -74,11 +76,12 @@ def _summarize_sync(text: str) -> str:
             truncation=True,
             max_length=chunk_size,
         )
+        min_tokens = min(30, max(8, len(chunk_ids) // 10))
         with torch.inference_mode():
             summary_ids = model.generate(
                 **inputs,
                 max_new_tokens=settings.bart_summary_tokens,
-                min_length=min(24, max(12, settings.bart_summary_tokens // 4)),
+                min_length=min_tokens,
                 num_beams=4,
                 do_sample=False,
                 early_stopping=True,
@@ -93,11 +96,12 @@ def _summarize_sync(text: str) -> str:
         inputs = tokenizer(
             combined, return_tensors="pt", truncation=True, max_length=chunk_size
         )
+        combined_tokens = len(tokenizer.encode(combined, add_special_tokens=False))
         with torch.inference_mode():
             summary_ids = model.generate(
                 **inputs,
                 max_new_tokens=220,
-                min_length=80,
+                min_length=min(30, max(8, combined_tokens // 10)),
                 num_beams=4,
                 do_sample=False,
                 early_stopping=True,
@@ -110,6 +114,10 @@ async def summarize_page(text: str) -> str:
     """Summarize extracted page text without blocking the async crawl loop."""
     if not text.strip():
         return ""
+    # BART tends to expand very short inputs into generic prose. Keep brief facts
+    # verbatim so statistics, dates, and source wording are not distorted.
+    if len(text.split()) < 40:
+        return _fallback_summary(text)
     if not settings.bart_enabled:
         return _fallback_summary(text)
     try:

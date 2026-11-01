@@ -22,6 +22,7 @@ from discovery import (
     extract_link_candidates_from_html,
     normalize_url,
     score_link_relevance,
+    search_result_matches_topic,
 )
 from evaluator import (
     compute_field_coverage,
@@ -30,7 +31,7 @@ from evaluator import (
     is_duplicate,
     should_stop,
 )
-from content_utils import has_useful_content, is_non_article_page
+from content_utils import extract_relevant_text, has_useful_content, is_non_article_page
 from offline_sources import cached_fallback_records
 from extractor import extract_page
 from planner import create_research_plan
@@ -104,6 +105,8 @@ def search_preview_record(candidate: CandidateURL, plan: ResearchPlan) -> Extrac
     snippet = (candidate.snippet or "").strip()
     if not title or not snippet or len(snippet.split()) < 8:
         return None
+    if not search_result_matches_topic(candidate.url, title, snippet, plan):
+        return None
     lower_snippet = snippet.casefold()
     generic_copy = any(
         phrase in lower_snippet
@@ -115,10 +118,15 @@ def search_preview_record(candidate: CandidateURL, plan: ResearchPlan) -> Extrac
             "discover everything you need to know",
         )
     )
-    specific_detail = bool(
-        re.search(r"\b\d+\b", snippet)
-        or re.search(r"\b(examples?|questions?|steps?|principles|checklist|star method|case study)\b", lower_snippet)
-    )
+    if re.search(r"\bplacements?\b", plan.topic, re.IGNORECASE):
+        specific_detail = bool(
+            extract_relevant_text(f"{title}\n{snippet}", plan.topic, title)
+        )
+    else:
+        specific_detail = bool(
+            re.search(r"\b\d+\b", snippet)
+            or re.search(r"\b(examples?|questions?|steps?|principles|checklist|star method|case study)\b", lower_snippet)
+        )
     preview_quality = 0.15 if generic_copy else min(
         0.85, 0.25 + min(len(snippet.split()), 40) * 0.01 + (0.25 if specific_detail else 0.0)
     )
@@ -237,6 +245,8 @@ async def _crawl_step(state: CrawlState, depth_limit: int) -> CrawlState:
         for link, anchor_text in child_links:
             norm_link = normalize_url(link)
             if norm_link in visited_set or norm_link in queued_set:
+                continue
+            if not search_result_matches_topic(norm_link, anchor_text, "", state.plan):
                 continue
             link_score = score_link_relevance(link, anchor_text, state.plan)
             if link_score >= 0.2:

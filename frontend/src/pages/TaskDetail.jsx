@@ -252,13 +252,13 @@ function ReportPanel({ report }) {
     <div className="space-y-5 text-sm">
       {/* Executive summary */}
       <div>
-        <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Executive Summary (BART)</h4>
+        <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Executive Summary</h4>
         <p className="text-slate-200 leading-relaxed">{r.executive_summary}</p>
       </div>
 
       {r.top_source_url && (
         <div className="bg-slate-800/40 rounded-lg p-4 space-y-2">
-          <h4 className="text-slate-400 text-xs uppercase tracking-wider">Most Relevant Source</h4>
+          <h4 className="text-slate-400 text-xs uppercase tracking-wider">Top Retrieved Result</h4>
           <p className="text-white font-medium">{r.top_source_title}</p>
           <SourceLink url={r.top_source_url} />
           {r.relevant_source_text && (
@@ -272,7 +272,7 @@ function ReportPanel({ report }) {
 
       {r.report_narrative && (
         <div>
-          <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Research Report (350–400 words)</h4>
+          <h4 className="text-slate-400 text-xs uppercase tracking-wider mb-2">Evidence-Based Research Report</h4>
           <p className="text-slate-200 leading-relaxed whitespace-pre-wrap">{r.report_narrative}</p>
           <p className="text-slate-500 text-xs mt-1">{r.report_narrative.trim().split(/\s+/).length} words</p>
         </div>

@@ -86,6 +86,12 @@ def _extract_location(text: str) -> list[str]:
 
 def _infer_fields(objective: str) -> list[str]:
     obj_lower = objective.lower()
+    if re.search(r"\bplacements?\b", obj_lower):
+        return [
+            "academic_year", "highest_package", "average_package", "median_package",
+            "placement_rate", "students_eligible", "students_placed", "offers_made",
+            "recruiters", "branch_wise_placements",
+        ]
     field_map = {
         ("laptop", "computer", "pc", "notebook"): [
             "name", "price", "cpu", "gpu", "ram", "storage", "display", "rating", "availability"
@@ -126,6 +132,12 @@ def _infer_fields(objective: str) -> list[str]:
 
 def _infer_source_categories(objective: str) -> list[str]:
     obj_lower = objective.lower()
+    if re.search(r"\bplacements?\b", obj_lower):
+        return [
+            "official institute placement reports",
+            "institute annual reports and disclosures",
+            "accredited education reporting sites",
+        ]
     if any(w in obj_lower for w in ["buy", "price", "purchase", "shop", "under", "cheap"]):
         return ["e-commerce", "price comparison", "review sites"]
     if any(w in obj_lower for w in ["review", "rating", "best", "top", "recommend"]):
@@ -137,6 +149,15 @@ def _infer_source_categories(objective: str) -> list[str]:
     return ["general web", "informational sites", "directories"]
 
 
+def _placement_institution(objective: str) -> str:
+    entity = re.sub(
+        r"\b(the|placement|placements|statistics|stats|data|report|details|"
+        r"of|for|about|find|research|give|show|tell|me|latest)\b",
+        " ", objective, flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", entity).strip(" .,:;-_")
+
+
 def _generate_search_queries(objective: str, topic: str) -> list[str]:
     """Generate diverse, specific search queries for better coverage."""
     # Strip common filler words for cleaner queries
@@ -146,8 +167,23 @@ def _generate_search_queries(objective: str, topic: str) -> list[str]:
     obj_lower = objective.lower()
     queries = [clean]
 
+    # Placement questions need annual reports and actual outcome measures, not
+    # broad "best/review" pages that often return promotional headlines only.
+    if re.search(r"\bplacements?\b", obj_lower):
+        from datetime import datetime
+
+        institution = _placement_institution(objective) or topic
+        year_match = re.search(r"20\d{2}(?:\s*[-/]\s*\d{2,4})?", objective)
+        target_year = year_match.group(0) if year_match else str(datetime.now().year)
+        queries = [
+            f"{institution} official placement report average median highest package placement rate {target_year}",
+            f"{institution} site:iiitdmj.ac.in placement statistics report PDF",
+            f"{institution} placement report branch wise students placed recruiters {target_year}",
+            f"{institution} placement data annual report {target_year}",
+            f"{institution} placement statistics previous academic year package students placed",
+        ]
     # News / current events queries
-    if any(w in obj_lower for w in ["news", "latest", "recent", "today", "2024", "2025"]):
+    elif any(w in obj_lower for w in ["news", "latest", "recent", "today", "2024", "2025"]):
         from datetime import datetime
         year = datetime.now().year
         queries = [
@@ -189,6 +225,10 @@ def plan_deterministic(objective: str, max_pages: int) -> ResearchPlan:
         re.IGNORECASE,
     )
     topic = topic_match.group(1).strip() if topic_match else objective[:60].strip()
+    if re.search(r"\bplacements?\b", objective, re.IGNORECASE):
+        institution = _placement_institution(objective)
+        if institution:
+            topic = f"{institution} placement statistics"
 
     constraints: list[str] = []
     constraints.extend(_extract_price_constraint(objective))
@@ -198,7 +238,23 @@ def plan_deterministic(objective: str, max_pages: int) -> ResearchPlan:
     source_categories = _infer_source_categories(objective)
     search_queries = _generate_search_queries(objective, topic)
 
-    extraction_schema = {field: f"Extract the {field} of the item" for field in required_fields}
+    extraction_schema = {
+        field: f"Extract the {field.replace('_', ' ')} from the source"
+        for field in required_fields
+    }
+    if re.search(r"\bplacements?\b", objective, re.IGNORECASE):
+        extraction_schema.update({
+            "academic_year": "The graduating cohort or academic year the placement figures describe",
+            "highest_package": "Highest reported package with currency, units, year, and source wording",
+            "average_package": "Average reported package with currency, units, year, and source wording",
+            "median_package": "Median reported package with currency, units, year, and source wording",
+            "placement_rate": "Percentage placed and its denominator or eligible cohort if stated",
+            "students_eligible": "Number of students eligible for placements",
+            "students_placed": "Number of students placed or placement offers made, distinguishing them",
+            "offers_made": "Number of placement offers, if reported",
+            "recruiters": "Number or names of recruiting organizations, if stated",
+            "branch_wise_placements": "Branch or program level placement figures",
+        })
 
     stopping_criteria = [
         f"All {len(required_fields)} required fields covered for at least 5 items",
@@ -230,6 +286,16 @@ async def create_research_plan(objective: str, max_pages: int) -> ResearchPlan:
     """
     plan = await plan_with_llm(objective, max_pages)
     if plan:
+        if re.search(r"\bplacements?\b", objective, re.IGNORECASE):
+            targeted = plan_deterministic(objective, max_pages)
+            return plan.model_copy(update={
+                "topic": targeted.topic,
+                "required_fields": targeted.required_fields,
+                "search_queries": targeted.search_queries,
+                "source_categories": targeted.source_categories,
+                "ranking_priorities": targeted.ranking_priorities,
+                "extraction_schema": targeted.extraction_schema,
+            })
         log.info("Research plan created via LLM for: %s", objective[:50])
         return plan
 

@@ -11,8 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from bart_summarizer import summarize_page
-from content_utils import extract_relevant_text
-from llm_client import generate
+from content_utils import clean_content_lines, extract_relevant_text
 from ranking import rank_records
 from schemas import (
     CrawlState, RankedResult, ResearchPlan, ResearchReport
@@ -21,108 +20,121 @@ from schemas import (
 log = logging.getLogger(__name__)
 
 
-# ──────────────────────────────────────────────
-# LLM-assisted summary
-# ──────────────────────────────────────────────
+def _placement_objective(objective: str) -> bool:
+    return bool(re.search(r"\bplacements?\b", objective, re.IGNORECASE))
 
-async def _llm_summary(objective: str, top_results: list[RankedResult], missing: list[str]) -> str | None:
-    if not top_results:
-        return None
 
-    snippets = []
-    for r in top_results[:5]:
-        snippets.append(
-            f"[{r.rank}] {r.title} ({r.domain}) – score {r.final_score:.2f}\n"
-            f"  Fields: {r.dynamic_fields}\n"
-            f"  Evidence: {r.evidence_snippets[0].text[:200] if r.evidence_snippets else 'N/A'}"
+def _evidence_sources(state: CrawlState, ranked: list[RankedResult]) -> list[dict[str, Any]]:
+    """Pair ranked pages with topic-filtered body text, excluding title-only evidence."""
+    is_placement = _placement_objective(state.objective)
+    records_by_url = {record.url: record for record in state.records}
+    sources: list[dict[str, Any]] = []
+    for result in ranked[:10]:
+        record = records_by_url.get(result.url)
+        if not record or not record.main_text.strip():
+            continue
+        evidence = extract_relevant_text(record.main_text, state.objective, record.title)
+        if not evidence:
+            continue
+        sources.append({
+            "record": record,
+            "result": result,
+            "title": record.title or result.title,
+            "url": record.url,
+            "domain": record.domain or result.domain,
+            "date": record.published_date,
+            "text": evidence,
+            "lines": clean_content_lines(
+                evidence,
+                min_length=1 if is_placement else 25,
+                allow_numeric=is_placement,
+            ),
+            "summary": "",
+        })
+    return sources
+
+
+def _report_narrative(
+    objective: str,
+    sources: list[dict[str, Any]],
+    state: CrawlState,
+    ranked: list[RankedResult],
+) -> str:
+    """Build a cited, evidence-first report without word-count padding."""
+    is_placement = _placement_objective(objective)
+    if not sources:
+        if is_placement:
+            return (
+                f"Research question: {objective}. The crawl returned {len(ranked)} ranked result(s) "
+                f"from {state.pages_crawled} page fetches, but the extracted article text did not "
+                "contain a verifiable placement figure. In particular, this run could not confirm "
+                "an average or median package, highest package, placement rate, number of students "
+                "placed, or recruiter and offer totals. A page headline or general claim about a "
+                "strong placement record is not a statistic, so none is presented as one here. "
+                "The result is inconclusive for the requested statistics and needs sources that "
+                "publish cohort-level placement data, such as an institute placement report or "
+                "official annual report."
+            )
+        return (
+            f"Research question: {objective}. The crawl fetched {state.pages_crawled} pages and "
+            f"ranked {len(ranked)} results, but none yielded enough topic-matched body text to "
+            "support a factual synthesis. The result is inconclusive; page titles alone are not "
+            "treated as evidence."
         )
 
-    prompt = f"""You are a research synthesis agent. Based on the following web research results,
-write a concise 3-5 sentence executive summary for the research objective.
+    parts = [f"Research question: {objective}."]
+    if is_placement:
+        parts.append(
+            f"This review found {len(sources)} source page(s) with placement-related numeric evidence. "
+            "The figures below are reported as each source states them; they should not be combined "
+            "unless the graduating cohort, branch coverage, and definition of placement match."
+        )
+    else:
+        parts.append(
+            f"The synthesis uses {len(sources)} of the {len(ranked)} ranked pages that contained "
+            "topic-matched body text. Each source is identified so its context can be checked."
+        )
 
-Objective: {objective}
+    for index, source in enumerate(sources[:5], start=1):
+        summary = source.get("summary", "").strip()
+        exact_text = " ".join(source["lines"])
+        description = summary if summary else exact_text
+        if is_placement and exact_text:
+            # Preserve the source's exact metric wording alongside BART's prose.
+            section = f"Source {index}, {source['title']} ({source['domain']}): {description}"
+            if summary and exact_text.casefold() not in summary.casefold():
+                section += f" Exact extracted figures: {exact_text}."
+        else:
+            section = f"Source {index}, {source['title']} ({source['domain']}): {description}"
+        if source.get("date"):
+            section += f" The page metadata gives its date as {source['date']}."
+        section += f" Source URL: {source['url']}"
+        parts.append(section)
 
-Top Results:
-{chr(10).join(snippets)}
+    if is_placement:
+        parts.append(
+            "Interpretation: a highest-package figure describes the top offer, not typical pay. "
+            "An average can be skewed by a small number of high offers, so a median, placement "
+            "rate, number eligible, number placed, and branch-wise breakdown provide a stronger "
+            "picture when the source publishes them. Package figures are also not take-home salary."
+        )
+    elif len(sources) > 1:
+        parts.append(
+            "Cross-source reading: treat repeated claims as stronger only when sources provide "
+            "independent evidence and comparable dates or definitions. Where pages use different "
+            "periods or measures, the report keeps their statements separate instead of averaging them."
+        )
 
-Missing Information: {', '.join(missing) if missing else 'None'}
-
-Write ONLY the executive summary paragraph. Base it strictly on the provided results.
-Do not invent prices, ratings, or specifications not present in the results."""
-
-    return await generate(prompt)
-
-
-async def _llm_findings(objective: str, top_results: list[RankedResult]) -> list[str] | None:
-    if not top_results:
-        return None
-
-    data_points = []
-    for r in top_results[:8]:
-        dynamic_fields = r.dynamic_fields if isinstance(r.dynamic_fields, dict) else {}
-        for field, value in dynamic_fields.items():
-            data_points.append(f"{r.title}: {field} = {value}")
-
-    prompt = f"""Based on the research results below for "{objective}",
-list 4-6 key findings or trends as short bullet points.
-Base your findings ONLY on the data provided. Do not invent information.
-
-Data points:
-{chr(10).join(data_points[:30])}
-
-Return one finding per line, starting with a dash (-)."""
-
-    raw = await generate(prompt)
-    if not raw:
-        return None
-    return [line.lstrip("-• ").strip() for line in raw.splitlines() if line.strip()]
-
-
-async def _report_narrative(
-    objective: str, summary: str, findings: list[str], state: CrawlState,
-    ranked: list[RankedResult], source_title: str, source_url: str,
-    relevant_text: str,
-) -> str:
-    """Write a report from the best page's relevant text and BART summary."""
-    facts = "\n".join(f"- {finding}" for finding in findings) or "No distinct findings were extracted."
-    prompt = f"""Write a clear research report of 360 to 390 words for the objective below.
-Use only the selected source text and its BART summary. Do not add claims from other pages,
-invent facts, or repeat generic website descriptions. Cover the useful findings, what the source
-does and does not establish, its date/context when available, and a practical conclusion.
-Return only report prose.
-
-Objective: {objective}
-Selected source: {source_title} ({source_url})
-BART summary: {summary}
-Relevant extracted source text:\n{relevant_text[:6000]}
-Findings:\n{facts}
-Pages crawled: {state.pages_crawled}; ranked results: {len(ranked)}.
-Missing fields: {', '.join(state.missing_fields) or 'None recorded'}.
-"""
-    generated = await generate(prompt)
-    text = " ".join((generated or "").split())
-    if len(text.split()) >= 350:
-        return " ".join(text.split()[:400])
-
-    # Deterministic completion ensures the requested minimum when the LLM is offline.
-    material = " ".join([summary, *findings, relevant_text[:1200]])
-    material = re.sub(r"\s+", " ", material).strip()
-    base = text or f"Research objective: {objective}. {summary}"
-    additions = [
-        f"The evidence review included {state.pages_crawled} crawled pages and {len(ranked)} ranked results. These counts describe the material available to this run and should not be read as a complete census of the web.",
-        f"The research was organized around the stated objective, {objective}. The selected page was {source_title}, published at {source_url}. The link is included so the source can be checked in its original context.",
-        f"The collected findings are: {facts.replace(chr(10), ' ')} Where a value or detail was not found, the report leaves that point unresolved instead of filling the gap with an assumption.",
-        f"Relevant source text reviewed: {material[:900]}. The selected passage focuses on details that match the research topic and omits navigation prompts, subscription copy, and unrelated page descriptions.",
-        f"Missing fields recorded for this task: {', '.join(state.missing_fields) or 'none'}. The result is a synthesis of retrieved sources under the crawl budget, and additional targeted sources could refine it.",
-    ]
-    for addition in additions:
-        if len(base.split()) >= 350:
-            break
-        base += " " + addition
-    words = base.split()
-    while len(words) < 350:
-        words.extend("The cited material defines the scope of this conclusion, and unresolved points remain open for further source review.".split())
-    return " ".join(words[:400])
+    missing = ", ".join(state.missing_fields)
+    if missing:
+        parts.append(f"Unresolved requested fields: {missing}.")
+    parts.append(
+        f"Scope and limitations: the crawl fetched {state.pages_crawled} pages and ranked "
+        f"{len(ranked)} results under a finite crawl budget. These counts describe this run, "
+        "not the whole web. Confirm important figures in the original source, especially where "
+        "a page is a third-party summary rather than an institute publication."
+    )
+    return "\n\n".join(parts)
 
 
 def _summary_findings(summary: str) -> list[str]:
@@ -208,54 +220,62 @@ async def generate_report(
     plan = state.plan
     objective = state.objective
 
-    # Choose the highest-ranked page, select only topic-relevant passages, and
-    # summarize those passages once with BART.
+    # Build evidence from several top-ranked pages; titles and page descriptions
+    # alone are not sufficient evidence for a factual report.
+    evidence_sources = _evidence_sources(state, ranked)
+    for source in evidence_sources[:5]:
+        source["summary"] = await summarize_page(source["text"])
+
     top_result = ranked[0] if ranked else None
-    top_record = next(
-        (record for record in state.records if top_result and record.url == top_result.url),
-        None,
+    lead_source = evidence_sources[0] if evidence_sources else None
+    top_record = lead_source["record"] if lead_source else next(
+        (record for record in state.records if top_result and record.url == top_result.url), None
     )
-    source_title = top_result.title if top_result else ""
-    source_url = top_result.url if top_result else ""
-    relevant_text = ""
-    bart_summary = ""
+    source_title = lead_source["title"] if lead_source else (top_result.title if top_result else "")
+    source_url = lead_source["url"] if lead_source else (top_result.url if top_result else "")
+    relevant_text = lead_source["text"] if lead_source else ""
+    bart_summary = lead_source["summary"] if lead_source else ""
     if top_record:
-        source_title = top_record.title or source_title
-        source_url = top_record.url or source_url
-        # Recompute from raw extracted page text so older saved passages cannot
-        # keep stale boilerplate after the cleanup rules improve.
-        relevant_text = extract_relevant_text(
-            top_record.main_text, objective, top_record.title
-        )
-        bart_summary = await summarize_page(relevant_text)
         top_record.relevant_text = relevant_text
         top_record.page_summary = bart_summary
-        if bart_summary:
-            top_record.dynamic_fields["summary"] = bart_summary
-            top_record.field_coverage["summary"] = True
-            ranked = rank_records(state.records, plan)
 
-    summary = bart_summary or (
-        " ".join(relevant_text.split()[:90]) if relevant_text else _fallback_summary(objective, ranked, state)
-    )
+    is_placement = _placement_objective(objective)
+    if is_placement and not evidence_sources:
+        summary = (
+            "The retrieved pages did not provide verifiable placement statistics. "
+            "No average or median package, highest package, placement rate, placed-student "
+            "count, or recruiter total could be confirmed from the extracted source text."
+        )
+        findings = ["No verifiable placement figures were present in the retrieved source text."]
+    else:
+        summary = bart_summary or (
+            " ".join(relevant_text.split()[:90])
+            if relevant_text else _fallback_summary(objective, ranked, state)
+        )
+        findings = []
+        for index, source in enumerate(evidence_sources[:5], start=1):
+            for line in source["lines"]:
+                finding = f"{line} (Source {index}: {source['domain']})"
+                if finding not in findings:
+                    findings.append(finding)
+                if len(findings) >= 6:
+                    break
+            if len(findings) >= 6:
+                break
+        if not findings:
+            findings = _summary_findings(bart_summary) or _fallback_findings(ranked, plan)
 
-    # Key findings
-    findings = _summary_findings(bart_summary) if bart_summary else None
-    if not findings:
-        findings = await _llm_findings(objective, ranked[:8])
-    if not findings:
-        findings = _fallback_findings(ranked, plan)
-
-    narrative = await _report_narrative(
-        objective, summary, findings, state, ranked,
-        source_title, source_url, relevant_text,
-    )
+    narrative = _report_narrative(objective, evidence_sources, state, ranked)
 
     # Comparison table
     comparison = _build_comparison_table(ranked, plan)
 
     # Limitations
     limitations: list[str] = []
+    if is_placement and not evidence_sources:
+        limitations.append(
+            "No numeric placement data was extracted; the report does not turn promotional placement claims into statistics."
+        )
     if state.missing_fields:
         limitations.append(f"Information for these fields was not found: {', '.join(state.missing_fields)}")
     if any(
@@ -286,7 +306,7 @@ async def generate_report(
         limitations.append("Results reflect information publicly available at crawl time; details may have changed")
 
     # Sources
-    sources = list({r.url for r in ranked[:20]})
+    sources = list(dict.fromkeys(r.url for r in ranked[:20]))
 
     # Crawl stats
     crawl_stats = {
@@ -335,7 +355,7 @@ async def generate_report(
         f"1. Parsed research objective into a structured plan with {len(plan.required_fields)} fields. "
         f"2. Generated {len(plan.search_queries)} search queries. "
         f"3. Adaptively crawled up to {plan.max_pages} pages, prioritising by relevance and coverage. "
-        f"4. Extracted useful, topic-matched passages and summarized the top-ranked source with local BART; structured fields used {field_method}. "
+        f"4. Extracted topic-matched passages and used local BART on up to five sources with usable text; structured fields used {field_method}. "
         f"{'A labeled cached passage was used where live page fetching failed. ' if cached_used else ''}"
         f"{'Search-result previews were used for sources that could not be fetched. ' if preview_used else ''}"
         f"5. Ranked {len(ranked)} results using weighted scoring (relevance, reliability, freshness, completeness)."
