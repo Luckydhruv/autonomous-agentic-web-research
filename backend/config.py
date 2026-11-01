@@ -47,9 +47,10 @@ class Settings(BaseSettings):
     default_max_response_size_kb: int = 2048
     default_rate_limit_delay: float = 1.5
 
-    # Local BART summarization. Model files are cached locally and need no API token.
+    # "auto" prefers the fine-tuned checkpoint in the repository root; set this
+    # to a Hugging Face ID or local path to override it.
     bart_enabled: bool = True
-    bart_model: str = "facebook/bart-large-cnn"
+    bart_model: str = "auto"
     bart_input_tokens: int = 900
     bart_summary_tokens: int = 100
 

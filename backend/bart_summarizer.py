@@ -5,10 +5,27 @@ import asyncio
 import logging
 import re
 from functools import lru_cache
+from pathlib import Path
 
 from config import settings
 
 log = logging.getLogger(__name__)
+
+
+def _model_source() -> str:
+    """Resolve the configured model, preferring the bundled fine-tuned weights."""
+    configured = settings.bart_model.strip()
+    if configured.lower() != "auto":
+        return configured
+
+    checkpoint_dir = Path(__file__).resolve().parent.parent
+    required_files = ("config.json", "model.safetensors", "tokenizer.json")
+    if all((checkpoint_dir / filename).is_file() for filename in required_files):
+        return str(checkpoint_dir)
+
+    # A clean clone may not contain the large fine-tuned weight file. Preserve
+    # the previous behavior in that case, with Hugging Face's persistent cache.
+    return "facebook/bart-large-cnn"
 
 
 @lru_cache(maxsize=1)
@@ -16,20 +33,19 @@ def _load_model():
     # Lazy loading keeps startup lightweight; Hugging Face caches weights locally.
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
+    model_source = _model_source()
+    is_local_checkpoint = Path(model_source).is_dir()
     try:
-        # Prefer the persistent cache so normal summarization never needs a token or
-        # a network request after the first model download.
-        tokenizer = AutoTokenizer.from_pretrained(
-            settings.bart_model, local_files_only=True
-        )
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            settings.bart_model, local_files_only=True
-        )
+        tokenizer = AutoTokenizer.from_pretrained(model_source, local_files_only=True)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_source, local_files_only=True)
     except OSError:
-        # First use: fetch and cache the model and tokenizer from Hugging Face.
-        tokenizer = AutoTokenizer.from_pretrained(settings.bart_model)
-        model = AutoModelForSeq2SeqLM.from_pretrained(settings.bart_model)
+        if is_local_checkpoint:
+            raise
+        # First use of a remote model downloads it into Hugging Face's cache.
+        tokenizer = AutoTokenizer.from_pretrained(model_source)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_source)
     model.eval()
+    log.info("Loaded BART summarizer from %s", model_source)
     return tokenizer, model
 
 

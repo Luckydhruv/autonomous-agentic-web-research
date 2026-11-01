@@ -130,7 +130,7 @@ CLOUD_LLM_MODEL=gpt-4o-mini
 
 ### Local BART page summarization
 
-The backend removes common page chrome, extracts topic-matched passages, ranks the pages, and summarizes the top-ranked source with `facebook/bart-large-cnn`. Long relevant passages are split into 900-token chunks and consolidated when needed. The report displays the selected source, relevant extracted text, and BART summary. Model files are cached locally; summarization does not require an API key or an expiring access token. The first run needs an internet connection to fetch model files. Configure `BART_ENABLED`, `BART_MODEL`, `BART_INPUT_TOKENS`, and `BART_SUMMARY_TOKENS` in `.env`; if model loading fails, the app keeps running and uses an extractive fallback.
+The backend removes common page chrome, extracts topic-matched passages, ranks the pages, and summarizes the top-ranked source with the fine-tuned BART checkpoint placed in the repository root. With `BART_MODEL=auto` (the default), it loads the local `config.json`, `model.safetensors`, and tokenizer files, so no API key or expiring access token is needed. Long relevant passages are split into 900-token chunks and consolidated when needed. The report displays the selected source, relevant extracted text, and BART summary. If the checkpoint is absent in a clean clone, the app falls back to `facebook/bart-large-cnn` and caches it on first use. Configure `BART_ENABLED`, `BART_MODEL`, `BART_INPUT_TOKENS`, and `BART_SUMMARY_TOKENS` in `.env`; an explicit model ID or local path in `BART_MODEL` overrides automatic selection. If model loading fails, the app keeps running and uses an extractive fallback.
 
 ### Serper search API (more reliable than DuckDuckGo scraping)
 
@@ -152,7 +152,7 @@ SERPER_API_KEY=your_key_here
 | `DEFAULT_MAX_PAGES` | `20` | Crawl budget per task |
 | `DEFAULT_CRAWL_DEPTH` | `2` | Max link-following depth |
 | `BART_ENABLED` | `true` | Use local BART to summarize each extracted page |
-| `BART_MODEL` | `facebook/bart-large-cnn` | Hugging Face model identifier, cached locally after download |
+| `BART_MODEL` | `auto` | Prefer the fine-tuned repo-root checkpoint; set a Hugging Face model ID or local path to override |
 | `BART_INPUT_TOKENS` | `900` | Per-chunk input budget, safely below BART's input limit |
 | `BART_SUMMARY_TOKENS` | `100` | Maximum tokens for each page chunk summary |
 | `EXTRA_BLOCKED_DOMAINS` | *(empty)* | Comma-separated extra SSRF blocklist |
